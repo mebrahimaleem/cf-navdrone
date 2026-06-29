@@ -1,0 +1,3 @@
+#!/bin/bash
+
+make cf21bl_defconfig
