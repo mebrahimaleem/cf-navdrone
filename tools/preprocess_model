@@ -1,0 +1,9 @@
+#!/bin/env bash
+
+if [ "$#" -ne 2 ]; then
+	echo "usage: $0 input output"
+	exit
+fi
+
+python -m onnxruntime.quantization.preprocess --input $1 --output $2
+echo "Model ($1) preprocessed to $2"

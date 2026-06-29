@@ -1,4 +1,8 @@
 .*
 
+/scratch/
+
+__pycache__/
+
 !.gitignore
 !.github
