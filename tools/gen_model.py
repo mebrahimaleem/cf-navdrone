@@ -5,11 +5,11 @@ import torch
 from net import net_table
 
 def usage():
-	print(f"usage: {sys.argv[0]} net file calib")
+	print(f"usage: {sys.argv[0]} net file calib [weights]")
 	print(f"known networks:", ", ".join(net_table.keys()))
 
 def main():
-	if len(sys.argv) != 4:
+	if len(sys.argv) != 4 and len(sys.argv) != 5:
 		usage()
 		return
 
@@ -21,6 +21,11 @@ def main():
 		return
 
 	torch_model = net_class()
+
+	if len(sys.argv) == 5:
+		chk = torch.load(sys.argv[4], weights_only=True, map_location=torch.device("cpu"))
+		torch_model.load_state_dict(chk)
+
 	torch_model.eval()
 
 	with open(sys.argv[2], "wb") as f:
