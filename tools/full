@@ -1,0 +1,14 @@
+#!/bin/env bash
+
+if [ "$#" -ne 2 ]; then
+	echo "usage: $0 model output"
+	exit
+fi
+
+TEMP_DIR=$(mktemp -d)
+trap "rm -rdf $TEMP_DIR" EXIT
+
+./tools/gen_model.py $1 $TEMP_DIR/1.onnx $TEMP_DIR/calib.pt || exit
+./tools/inline_model.py $TEMP_DIR/1.onnx $TEMP_DIR/2.onnx || exit
+./tools/preprocess_model $TEMP_DIR/2.onnx $TEMP_DIR/3.onnx || exit
+./tools/quantize_model.py $TEMP_DIR/3.onnx $2 $TEMP_DIR/calib.pt || exit

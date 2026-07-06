@@ -11,14 +11,14 @@ def usage():
 def main():
 	if len(sys.argv) != 4 and len(sys.argv) != 5:
 		usage()
-		return
+		return -1
 
 	net_class = net_table.get(sys.argv[1], None)
 
 	if net_class == None:
 		print(f"Unkown net {sys.argv[1]}")
 		usage()
-		return
+		return -1
 
 	torch_model = net_class()
 
@@ -45,5 +45,7 @@ def main():
 	torch.save(torch_model.gen_calib_data(), sys.argv[3])
 	print(f"Model calibration data saved to {sys.argv[3]}")
 
+	return 0
+
 if __name__ == "__main__":
-	main()
+	sys.exit(main())

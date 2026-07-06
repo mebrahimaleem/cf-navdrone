@@ -21,7 +21,7 @@ def usage():
 def main():
 	if len(sys.argv) != 4:
 		usage()
-		return
+		return -1
 
 	quantize_static(
 		sys.argv[1],
@@ -35,5 +35,7 @@ def main():
 
 	print(f"Model ({sys.argv[1]}) quantized to {sys.argv[2]}")
 
+	return 0
+
 if __name__ == "__main__":
-	main()
+	sys.exit(main())
