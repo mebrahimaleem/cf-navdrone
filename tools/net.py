@@ -135,20 +135,14 @@ class SimpleLSTMNet(nn.Module):
 	def __init__(self):
 		super(SimpleLSTMNet, self).__init__()
 
-		self.lstm0 = nn.LSTMCell(16, 32)
-		self.lstm1 = nn.LSTMCell(16, 32)
-		self.lstm2 = nn.LSTMCell(16, 32)
-		self.lstm3 = nn.LSTMCell(16, 32)
+		self.lstm_cell = nn.LSTMCell(16, 32)
 		self.fc = nn.Linear(32, 2)
 
 		self.register_buffer("h", torch.zeros(1, 32))
 		self.register_buffer("c", torch.zeros(1, 32))
 
 	def forward(self, x):
-		self.h, self.c = self.lstm0(x, (self.h, self.c))
-		self.h, self.c = self.lstm1(x, (self.h, self.c))
-		self.h, self.c = self.lstm2(x, (self.h, self.c))
-		self.h, self.c = self.lstm3(x, (self.h, self.c))
+		self.h, self.c = self.lstm_cell(x, (self.h, self.c))
 
 		return self.fc(self.h)
 
@@ -192,6 +186,74 @@ class BigConvNet(nn.Module):
 	def gen_calib_data(self, n=100):
 		return torch.randn(n, 1, 1, 320, 320)
 
+class CompleteNet(nn.Module):
+	def __init__(self):
+		super(CompleteNet, self).__init__()
+
+		self.cnn = nn.Sequential(
+			# 1x1x320x320
+			nn.Conv2d(in_channels=1, out_channels=32, stride=4, kernel_size=3, padding=1),
+			# 1x32x80x80
+			nn.ReLU(inplace=True),
+			nn.Conv2d(in_channels=32, out_channels=32, kernel_size=3, padding=1),
+			nn.ReLU(inplace=True),
+			nn.MaxPool2d(kernel_size=2, stride=2),
+			# 1x32x40x40
+
+			nn.Conv2d(in_channels=32, out_channels=64, kernel_size=3, padding=1),
+			# 1x64x40x40
+			nn.ReLU(inplace=True),
+			nn.Conv2d(in_channels=64, out_channels=64, kernel_size=3, padding=1),
+			nn.ReLU(inplace=True),
+			nn.MaxPool2d(kernel_size=2, stride=2),
+			# 1x64x20x20
+
+			nn.Conv2d(in_channels=64, out_channels=128, kernel_size=3, padding=1),
+			# 1x64x20x20
+			nn.ReLU(inplace=True),
+			nn.Conv2d(in_channels=128, out_channels=128, kernel_size=3, padding=1),
+			nn.ReLU(inplace=True),
+			nn.Conv2d(in_channels=128, out_channels=128, kernel_size=3, padding=1),
+			nn.ReLU(inplace=True),
+			nn.MaxPool2d(kernel_size=2, stride=2),
+			# 1x128x10x10
+
+			nn.Conv2d(in_channels=128, out_channels=256, kernel_size=3, padding=1),
+			# 1x128x10x10
+			nn.ReLU(inplace=True),
+			nn.Conv2d(in_channels=256, out_channels=256, kernel_size=3, padding=1),
+			nn.ReLU(inplace=True),
+			nn.Conv2d(in_channels=256, out_channels=256, kernel_size=3, padding=1),
+			nn.ReLU(inplace=True),
+			nn.MaxPool2d(kernel_size=2, stride=2),
+			# 1x256x5x5
+
+			nn.AdaptiveAvgPool2d((1, 1)),
+			# 1x256x1x1
+			nn.Flatten(),
+			# 1x256
+		)
+
+		self.lstm_layer_1 = nn.LSTMCell(256, 256)
+		self.lstm_layer_2 = nn.LSTMCell(256, 256)
+		self.lstm_layer_3 = nn.LSTMCell(256, 256)
+		self.fc = nn.Linear(256, 3)
+
+	def forward(self, x):
+		h0 = self.cnn(x)
+
+		h1, _ = self.lstm_layer_1(F.relu(h0, inplace=True))
+		h2, _ = self.lstm_layer_2(F.relu(h1, inplace=True))
+		h3, _ = self.lstm_layer_3(F.relu(h2, inplace=True))
+
+		return self.fc(F.relu(h3, inplace=True))
+
+	def example_inputs(self):
+		return torch.empty(1, 1, 320, 320)
+
+	def gen_calib_data(self, n=100):
+		return torch.randn(n, 1, 1, 320, 320)
+
 net_table = {
 	"SimpleLinear": SimpleLinearNet,
 	"SimpleConv": SimpleConvNet,
@@ -199,4 +261,5 @@ net_table = {
 	"Simple8D": Simple8DNet,
 	"SimpleLSTM": SimpleLSTMNet,
 	"BigConv": BigConvNet,
+	"Complete": CompleteNet,
 }

@@ -1,6 +1,7 @@
 .*
 
 *.o
+*.bak
 
 /scratch/
 
