@@ -174,6 +174,9 @@ async def pipeline():
 
         while True:
             clock.tick()
+
+            await asyncio.sleep_ms(0)
+
             event_count = csi0.ioctl(csi.IOCTL_GENX320_READ_EVENTS, events)
 
             cur_interval += event_count
@@ -231,7 +234,6 @@ async def pipeline():
                 cmd = CFConnection.FLIGHT_CMD_FWD
 
             cf_con.write_flight_command(cmd)
-            await asyncio.sleep_ms(0)
 
     except Exception as e:
         print("Pipeline Crashed:", e)
