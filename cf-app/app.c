@@ -5,20 +5,21 @@
 #include "FreeRTOS.h"
 #include "task.h"
 
+#define DEBUG_MODULE	"NAV"
+
 #include "app.h"
 #include "commander.h"
-#include "crtp_commander_high_level.h"
 #include "supervisor.h"
 #include "uart1.h"
-#include "led.h"
+#include "ledseq.h"
 #include "debug.h"
 #include "log.h"
-
-#define DEBUG_MODULE "NAVAPP"
 
 #define BAUDRATE        115200
 #define CON_RESET     	0xB8u
 #define CON_MAGIC     	0x3Eu
+
+#define INIT_DEL_MS			5000
 
 #define BIT_FWD         0x01u
 #define BIT_BACK        0x02u
@@ -40,13 +41,13 @@
 
 #define READ_TIMEOUT_MS     1000
 
-#define LED_PERIOD					250
+#define LED_PERIOD_MS				250
 
 #define Z_INIT_M         		0.30f
 #define Z_DODGE_M           0.60f
 
-#define TAKEOFF_TIME_S			2
-#define LANDING_TIME_S			1
+#define TAKEOFF_TIME_MS			2000
+#define LANDING_TIME_MS			1000
 #define LANDING_ALT_M				0.03f
 
 #define VBAT_MIN_V         	3.00f
@@ -56,8 +57,8 @@
 #define UART_PUT(byte)	uart1Putchar(byte)
 
 #define ARM_GUARD()			do if(!supervisorIsArmed()) return; while(0)
-#define FATAL_GUARD()		do if(fs_state == FS_FATL) return; while(0)
-#define CHECK_GROUND()	do if(crtpCommanderHighLevelIsStopped() && fs_state != FS_FATL) fs_state = FS_GRND; while(0)
+#define DO_FATAL()			do if (fs_state == FS_FATL)
+#define FATAL_GUARD()		DO_FATAL() return; while(0)
 
 static enum link_state_t {
 	LS_COLD,
@@ -79,52 +80,69 @@ static enum fs_state_t {
 enum cmd_t {
 	CMD_NONE = 0x00,
 	CMD_FLCN = 0x01,
+	CMD_LFPS = 0x02,
+	CMD_LERR = 0x03,
+	CMD_MAGIC = CON_MAGIC
 };
 
-static inline void emergency_land(void) {
-	ARM_GUARD();	
+static void update_led(void) {
+	static ledseqStep_t seq[] = {
+		{.value = true, .action = LEDSEQ_WAITMS(LED_PERIOD_MS)},
+		{.value = false, .action = LEDSEQ_WAITMS(LED_PERIOD_MS)},
+		{.value = false, .action = LEDSEQ_LOOP}
+	};
 
-	commanderRelaxPriority();
-	if (crtpCommanderHighLevelLand(LANDING_ALT_M, LANDING_TIME_S)) {
-		fs_state = FS_FATL;
-		return;
+	static ledseqContext_t ok_seq = {
+		.sequence = seq,
+		.nextContext = NULL,
+		.state = 0,
+		.led = LED_GREEN_L
+	};
+
+	static ledseqContext_t bad_seq = {
+		.sequence = seq,
+		.nextContext = NULL,
+		.state = 0,
+		.led = LED_BLUE_L
+	};
+
+	static bool registered = false;
+
+	if (!registered) {
+		ledseqRegisterSequence(&ok_seq);
+		ledseqRegisterSequence(&bad_seq);
+		registered = true;
 	}
 
-	vTaskDelay(M2T(LANDING_TIME_S));
-
-	CHECK_GROUND();
+	switch (fs_state) {
+		case FS_GRND:
+		case FS_FLYN:
+			ledseqStop(&bad_seq);
+			ledseqRun(&ok_seq);
+			break;
+		case FS_FATL:
+			ledseqRun(&bad_seq);
+			ledseqStop(&ok_seq);
+			break;
+	}
 }
 
-static inline void takeoff(void) {
+static void takeoff(void);
+
+static void set_setpoint(float vx, float vy, float z, float phi) {
 	ARM_GUARD();
-	FATAL_GUARD();
 
-	commanderRelaxPriority();
-	if (crtpCommanderHighLevelTakeoff(Z_INIT_M, TAKEOFF_TIME_S)) {
-		fs_state = FS_FATL;
-		return;
-	}
+	DO_FATAL() { vx = 0; vy = 0; z = 0; phi = 0; } while(0);
 
-	vTaskDelay(M2T(TAKEOFF_TIME_S * 1000));
-	if (crtpCommanderHighLevelIsStopped()) {
-		fs_state = FS_FATL;
-		return;
-	}
-
-	fs_state = FS_FLYN;
-}
-
-static inline void set_setpoint(float vx, float vy, float z, float phi) {
-	ARM_GUARD();
-	FATAL_GUARD();
-
-	if (fs_state != FS_FLYN) {
+	if (fs_state != FS_FLYN && (vx || vy || phi)) {
 		takeoff();
-	}
 
-	if (fs_state != FS_FLYN) {
-		fs_state = FS_FATL;
-		return;
+		if (fs_state != FS_FLYN) {
+			DEBUG_PRINT("Cannot move laterally on the ground\n");
+			fs_state = FS_FATL;
+			update_led();
+			return;
+		}
 	}
 
 	static setpoint_t setpoint;
@@ -141,37 +159,38 @@ static inline void set_setpoint(float vx, float vy, float z, float phi) {
   setpoint.attitudeRate.yaw = phi;
   setpoint.velocity_body    = true;
 
-  commanderSetSetpoint(&setpoint, COMMANDER_PRIORITY_HIGHLEVEL);
-}
 
-__attribute__((noreturn)) static void led_task(void* arg) {
-	(void)arg;
-
-	static uint8_t parity = 0;
-
-	while (1) {
-		if (parity) {
-			ledSet(LED_GREEN_L, 0);
-			ledSet(LED_BLUE_L, 0);
-		}
-
-		switch (fs_state) {
-			case FS_GRND:
-			case FS_FLYN:
-				ledSet(LED_GREEN_L, 1);
-				break;
-			case FS_FATL:
-				ledSet(LED_BLUE_L, 1);
-				break;
-			default:
-				break;
-		}
-
-		parity = ~parity;
-		vTaskDelay(M2T(LED_PERIOD));
+	if (commanderGetActivePriority() > COMMANDER_PRIORITY_NAV) {
+		DEBUG_PRINT("Manual control bypassing setpoint");
+		return;
 	}
 
-	__builtin_unreachable();
+  commanderSetSetpoint(&setpoint, COMMANDER_PRIORITY_NAV);
+}
+
+static inline void land(void) {
+	ARM_GUARD();	
+
+	DEBUG_PRINT("Landing\n");
+
+	set_setpoint(0, 0, 0, 0);
+
+	vTaskDelay(M2T(LANDING_TIME_MS));
+
+	fs_state = FS_GRND;
+}
+
+static inline void takeoff(void) {
+	ARM_GUARD();
+	FATAL_GUARD();
+
+	DEBUG_PRINT("Taking off\n");
+
+	set_setpoint(0, 0, Z_INIT_M, 0);
+
+	vTaskDelay(M2T(TAKEOFF_TIME_MS));
+
+	fs_state = FS_FLYN;
 }
 
 __attribute__((noreturn)) static void nav_task(void* arg) {
@@ -182,64 +201,77 @@ __attribute__((noreturn)) static void nav_task(void* arg) {
 	static uint8_t pend;
 
 	
-  static logVarId_t vbat_id = 0;
+  static logVarId_t vbat_id;
 	static float vbat = 0.0f;
 	static float vbat_brownout_time = 0.0f;
 	static TickType_t now;
 
+	vTaskDelay(M2T(INIT_DEL_MS));
+
 	float vxT, vyT, vyawT, vx = 0, vy = 0, vyaw = 0;
 	float pzT = Z_INIT_M, pz = Z_INIT_M;
 
+	update_led();
+	uart1Init(BAUDRATE);
+  vbat_id = logGetVarId("pm", "vbat");
+
+	if (vbat_id < 0) {
+		DEBUG_PRINT("Failed to get vbat info\n");
+		fs_state = FS_FATL;
+		update_led();
+	}
+
 	while(1) {
 		now = xTaskGetTickCount();
-		vbat = logGetFloat(vbat_id);
+		if (vbat_id >= 0) {
+			vbat = logGetFloat(vbat_id);
 
-		if (vbat < VBAT_MIN_V && fs_state == FS_FLYN) {
-			if (!vbat_brownout_time) {
-				vbat_brownout_time = now + M2T(VBAT_DEBOUNCE_MS);
+			if (vbat < VBAT_MIN_V && fs_state == FS_FLYN) {
+				if (!vbat_brownout_time) {
+					vbat_brownout_time = now + M2T(VBAT_DEBOUNCE_MS);
+				}
+				else if (now >= vbat_brownout_time) {
+					DEBUG_PRINT("Battery browning out. Landing\n");
+					fs_state = FS_FATL;
+					update_led();
+					land();
+				}
 			}
-			else if (now >= vbat_brownout_time) {
-				DEBUG_PRINT("Battery browning out. Landing");
-				fs_state = FS_FATL;
-				emergency_land();
+			else {
+				vbat_brownout_time = 0.0f;
 			}
 		}
-		else {
-			vbat_brownout_time = 0.0f;
-		}
-
-		CHECK_GROUND();
 
 		if (!UART_GET(&byte)) {
-			DEBUG_PRINT("Timeout reading from UART");
-			emergency_land();
+			DEBUG_PRINT("Timeout reading from UART\n");
+			land();
 			continue;
 		}
 
 		if (byte == CON_RESET) {
 			link_state = LS_COLD;
-			DEBUG_PRINT("UART link reset");
+			DEBUG_PRINT("UART link reset\n");
 			UART_PUT(CON_RESET);
-			emergency_land();
+			land();
 
 			while (UART_GET(&byte)) {
 				if (byte == CON_RESET) {
 					UART_PUT(CON_RESET);
 				}
 				else {
-					DEBUG_PRINT("Unexpected byte %x during reset sequence", byte);
+					DEBUG_PRINT("Unexpected byte %x during reset sequence\n", byte);
 				}
 			}
 
 			UART_PUT(CON_MAGIC);
 
 			link_state = LS_ESTB;
-			DEBUG_PRINT("UART link established");
+			DEBUG_PRINT("UART link established\n");
 			continue;
 		}
 
 		if (link_state != LS_ESTB) {
-			DEBUG_PRINT("Garbage byte %x during cold connection", byte);
+			DEBUG_PRINT("Garbage byte %x during cold connection\n", byte);
 			continue;
 		}
 
@@ -249,7 +281,7 @@ __attribute__((noreturn)) static void nav_task(void* arg) {
 					cmd_state = CS_CMD;
 				}
 				else {
-					DEBUG_PRINT("Garbage byte %x after command %x", byte, cmd);
+					DEBUG_PRINT("Garbage byte %x after command %x\n", byte, cmd);
 				}
 				break;
 			case CS_CMD:
@@ -257,10 +289,16 @@ __attribute__((noreturn)) static void nav_task(void* arg) {
 				cmd_state = CS_DIS;
 				switch (cmd) {
 					case CMD_FLCN:
+					case CMD_LFPS:
+					case CMD_LERR:
 						pend = 1;
 						break;
+					case CMD_MAGIC:
+						DEBUG_PRINT("Ignoring spurious magic\n");
+						cmd_state = CS_CMD;
+						break;
 					default:
-						DEBUG_PRINT("Unkown command %x", cmd);
+						DEBUG_PRINT("Unkown command %x\n", cmd);
 						cmd_state = CS_IDL;
 						break;
 				}
@@ -285,7 +323,15 @@ __attribute__((noreturn)) static void nav_task(void* arg) {
 						vyaw += SMOOTH_ALPHA * (vyawT - vyaw);
 						pz += SMOOTH_ALPHA * (pzT - pz);
 
-						set_setpoint(vx, vy, vyaw, pz);
+						set_setpoint(vx, vy, pz, vyaw);
+						break;
+					case CMD_LFPS:
+						DEBUG_PRINT("Master FPS: %u\n", byte);
+						break;
+					case CMD_LERR:
+						DEBUG_PRINT("Unrecoverable error from master: %x\n", byte);
+						break;
+					case CMD_MAGIC:
 						break;
 				}
 
@@ -301,6 +347,5 @@ __attribute__((noreturn)) static void nav_task(void* arg) {
 }
 
 void appInit(void) {
-	xTaskCreate(led_task, "LED Manager", 2 & configMINIMAL_STACK_SIZE, NULL, 1, NULL);
-	xTaskCreate(nav_task, "Navigation Manager", 2 & configMINIMAL_STACK_SIZE, NULL, 1, NULL);
+	xTaskCreate(nav_task, "Navigation Manager", 2 * configMINIMAL_STACK_SIZE, NULL, 1, NULL);
 }
