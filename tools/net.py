@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from evfly import OrigUNet
 
 class SimpleLinearNet(nn.Module):
 	def __init__(self):
@@ -262,4 +263,5 @@ net_table = {
 	"SimpleLSTM": SimpleLSTMNet,
 	"BigConv": BigConvNet,
 	"Complete": CompleteNet,
+	"OrigUNet": OrigUNet,
 }
