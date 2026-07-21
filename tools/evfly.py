@@ -209,17 +209,52 @@ class ConvLSTM(nn.Module):
         return param
 
 class OrigUNet(nn.Module):
-    def __init__(self, num_in_channels=2, num_out_channels=1, num_recurrent=0, enc_params=None, dec_params=None, input_shape=[1, 2, 320, 320], device=None, logger=None, velpred=0, fc_params=None, form_BEV=0, is_deployment=False, is_large=False, evs_min_cutoff=1e-3, skip_type='crop'):
+    def __init__(self, num_in_channels=2, num_out_channels=2, num_recurrent=[0], enc_params=None, dec_params=None, input_shape=[1, 2, 320, 320], device=None, logger=None, velpred=0, fc_params=None, form_BEV=0, is_deployment=False, is_large=False, evs_min_cutoff=0.0, skip_type='crop'):
         super().__init__()
 
         if logger is not None:
             mylogger = logger
         else:
             mylogger = print
-        
+
+        if enc_params is None:
+                    enc_params = {
+                        'num_layers': 2,
+                        'kernel_sizes': [5, 5],
+                        'kernel_strides': [2, 2],
+                        'out_channels': [16, 64],
+                        'activations': ['relu', 'relu'],
+                        'pool_type': 'max',
+                        'invert_pool_inputs': False,
+                        'pool_kernels': [2, 2],
+                        'pool_strides': [2, 2],
+                        'conv_function': 'conv2d',
+                    }
+
+        if dec_params is None:
+                    dec_params = {
+                        'num_layers': 2,
+                        'kernel_sizes': [5, 5],
+                        'kernel_strides': [2, 2],
+                        'out_channels': [64, 16],
+                        'activations': ['relu', 'relu'],
+                        'pool_type': 'none',
+                        'pool_kernels': [2, 2],
+                        'pool_strides': [2, 2],
+                        'conv_function': 'upconv2d',
+                    }
+
+        if fc_params is None:
+                    fc_params = {
+                        'num_layers': 2,
+                        'layer_sizes': [128, 64],
+                        'activations': ['relu', 'relu'],
+                        'dropout_p': 0.5,
+                    }
+ 
         self.num_in_channels = num_in_channels
         self.num_out_channels = num_out_channels
-        self.num_recurrent = [num_recurrent]
+        self.num_recurrent = num_recurrent
         self.input_shape = input_shape
         self.input_h, self.input_w = input_shape[-2], input_shape[-1]
         self.velpred = velpred
@@ -347,8 +382,10 @@ class OrigUNet(nn.Module):
     # first channel negative values, second channel positive values
     def form_input(self, x):
         x[x.abs()<self.evs_min_cutoff] = 0.0
+        print("----------SHAPE", x.shape)
         if self.form_BEV == 0:
-            des_input = torch.zeros_like(x).expand(-1, 2, -1, -1)
+            des_input = torch.zeros_like(x).expand(1, 2, x.shape[-2], x.shape[-1])
+            print(des_input.shape)
             des_input[:, 0, :, :] = torch.where(x < 0, torch.abs(x), torch.tensor(0.0).float().to(self.device))[:, 0, :, :]
             des_input[:, 1, :, :] = torch.where(x > 0, x, torch.tensor(0.0).float().to(self.device))[:, 0, :, :]
         
@@ -487,7 +524,7 @@ class OrigUNet(nn.Module):
 
         return y_vel, (y_interp, y_upconv, (h_unet, h_velpred))
     def example_inputs(self):
-        return torch.empty(1, 2, 320, 320)
+        return [torch.empty(1, 2, 320, 320), torch.empty(1, 2), None]
 
     def gen_calib_data(self, n=100):
         return torch.randn(n, 1, 2, 320, 320)

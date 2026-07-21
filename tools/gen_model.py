@@ -31,7 +31,7 @@ def main():
 	with open(sys.argv[2], "wb") as f:
 		onnx_model = torch.onnx.export(
 			torch_model,
-			torch_model.example_inputs(),
+			(torch_model.example_inputs(),),
 			f,
 			dynamo=False,
 			input_names=["inputs"],
