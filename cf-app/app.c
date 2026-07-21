@@ -30,11 +30,10 @@
 #define BIT_YAWR        0x40u
 #define BIT_YAWL        0x80u
 
-#define VX_SPEED_MPS    0.65f
-#define VY_SPEED_MPS    0.55f
-#define YAW_SPEED_DPS   60.0f
+#define V_SPEED_MPS    	0.55f
+#define YAW_SPEED_DPS		45.0f
 
-#define SMOOTH_ALPHA   0.95f
+#define SMOOTH_ALPHA   0.20f
 
 #define VY_SIGN         (+1.0f)
 #define YAW_SIGN        (+1.0f)
@@ -43,8 +42,8 @@
 
 #define LED_PERIOD_MS				250
 
-#define Z_INIT_M         		0.30f
-#define Z_DODGE_M           0.60f
+#define Z_INIT_M         		0.40f
+#define Z_DODGE_M           0.50f
 
 #define TAKEOFF_TIME_MS			2000
 #define LANDING_TIME_MS			1000
@@ -309,14 +308,15 @@ __attribute__((noreturn)) static void nav_task(void* arg) {
 						break;
 					case CMD_FLCN:
 						vxT = vyT = vyawT = 0.0f;
-						if (byte & BIT_FWD)   vxT += VX_SPEED_MPS;
-						if (byte & BIT_BACK)  vxT -= VX_SPEED_MPS;
-						if (byte & BIT_RIGHT) vyT -= VY_SIGN * VY_SPEED_MPS;
-						if (byte & BIT_LEFT)  vyT += VY_SIGN * VY_SPEED_MPS;
-						if (byte & BIT_YAWR)  vyawT -= YAW_SIGN * YAW_SPEED_DPS;
-						if (byte & BIT_YAWL)  vyawT += YAW_SIGN * YAW_SPEED_DPS;
-						if (byte & BIT_UP)    pzT = Z_DODGE_M;
-						if (byte & BIT_DOWN)  pzT = Z_INIT_M;
+
+						if (byte & BIT_FWD) vxT += V_SPEED_MPS;
+						//else if (byte & BIT_BACK) vxT -= V_SPEED_MPS;
+						if (byte & BIT_RIGHT) vyT -= VY_SIGN * V_SPEED_MPS;
+						else if (byte & BIT_LEFT) vyT += VY_SIGN * V_SPEED_MPS;
+						if (byte & BIT_YAWR) vyawT -= YAW_SIGN * YAW_SPEED_DPS;
+						else if (byte & BIT_YAWL) vyawT += YAW_SIGN * YAW_SPEED_DPS;
+						if (byte & BIT_DOWN) pzT = Z_INIT_M;
+						else if (byte & BIT_UP) pzT = Z_DODGE_M;
 
 						vx  += SMOOTH_ALPHA * (vxT  - vx);
 						vy  += SMOOTH_ALPHA * (vyT  - vy);
