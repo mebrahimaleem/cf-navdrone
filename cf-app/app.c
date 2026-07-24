@@ -42,8 +42,8 @@
 
 #define LED_PERIOD_MS				250
 
-#define Z_INIT_M         		0.40f
-#define Z_DODGE_M           0.50f
+#define Z_INIT_M         		0.50f
+#define Z_DODGE_M           0.60f
 
 #define TAKEOFF_TIME_MS			2000
 #define LANDING_TIME_MS			1000
@@ -208,7 +208,7 @@ __attribute__((noreturn)) static void nav_task(void* arg) {
 	vTaskDelay(M2T(INIT_DEL_MS));
 
 	float vxT, vyT, vyawT, vx = 0, vy = 0, vyaw = 0;
-	float pzT = Z_INIT_M, pz = Z_INIT_M;
+	float pz = Z_INIT_M;
 
 	update_led();
 	uart1Init(BAUDRATE);
@@ -315,13 +315,12 @@ __attribute__((noreturn)) static void nav_task(void* arg) {
 						else if (byte & BIT_LEFT) vyT += VY_SIGN * V_SPEED_MPS;
 						if (byte & BIT_YAWR) vyawT -= YAW_SIGN * YAW_SPEED_DPS;
 						else if (byte & BIT_YAWL) vyawT += YAW_SIGN * YAW_SPEED_DPS;
-						if (byte & BIT_DOWN) pzT = Z_INIT_M;
-						else if (byte & BIT_UP) pzT = Z_DODGE_M;
+						if (byte & BIT_DOWN) pz = Z_INIT_M;
+						else if (byte & BIT_UP) pz = Z_DODGE_M;
 
 						vx  += SMOOTH_ALPHA * (vxT  - vx);
 						vy  += SMOOTH_ALPHA * (vyT  - vy);
 						vyaw += SMOOTH_ALPHA * (vyawT - vyaw);
-						pz += SMOOTH_ALPHA * (pzT - pz);
 
 						set_setpoint(vx, vy, pz, vyaw);
 						break;
