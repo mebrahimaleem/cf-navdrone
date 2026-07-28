@@ -1,0 +1,5 @@
+270a271,274
+>     scale = numpy.array(numpy.random.uniform(0.001, 0.1), dtype=rmax.dtype)
+>     zero_point = numpy.array(numpy.random.randint(int(qmin), int(qmax) + 1), dtype=qmin.dtype)
+>     return [zero_point, scale]
+> 

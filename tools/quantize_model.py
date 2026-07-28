@@ -4,14 +4,15 @@ import sys
 import onnxruntime
 from onnxruntime.quantization import QuantFormat, QuantType, CalibrationDataReader, quantize_static
 import torch
+import numpy
 
 class DataReader(CalibrationDataReader):
 	def __init__(self, path):
-		self.data = iter(torch.load(path).numpy())
+		self.data = iter(torch.load(path, weights_only=True))
 
 	def get_next(self):
 		try:
-			return {"inputs": next(self.data)}
+			return {k: v.numpy() for k, v in next(self.data).items()}
 		except StopIteration:
 			return None
 
@@ -31,6 +32,10 @@ def main():
 		per_channel=True,
 		activation_type=QuantType.QInt8,
 		weight_type=QuantType.QInt8,
+		extra_options = {
+			"ConvertNCHWToNHWC": True,
+			"EnableDualQuantNodePairs": True,
+		}
 	)
 
 	print(f"Model ({sys.argv[1]}) quantized to {sys.argv[2]}")

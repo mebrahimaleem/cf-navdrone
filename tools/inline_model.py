@@ -8,8 +8,7 @@ import onnx.inliner
 
 
 def usage():
-	print(f"usage: {sys.argv[0]} net file")
-	print(f"known networks:", ", ".join(net_table.keys()))
+	print(f"usage: {sys.argv[0]} input output")
 
 def main():
 	if len(sys.argv) != 3:

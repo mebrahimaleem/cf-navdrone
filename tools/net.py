@@ -1,7 +1,6 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from evfly import OrigUNet
 
 class SimpleLinearNet(nn.Module):
 	def __init__(self):
@@ -18,10 +17,16 @@ class SimpleLinearNet(nn.Module):
 		return x
 
 	def example_inputs(self):
-		return torch.empty(8)
+		return (torch.empty(8),)
 
 	def gen_calib_data(self, n=100):
-		return torch.randn(n, 8)
+		return [{"inputs": torch.randn(8)} for i in range(n)]
+
+	def input_names(self):
+		return ["inputs"]
+
+	def output_names(self):
+		return ["outputs"]
 
 class SimpleConvNet(nn.Module):
 	def __init__(self):
@@ -51,10 +56,16 @@ class SimpleConvNet(nn.Module):
 		return self.net(x)
 
 	def example_inputs(self):
-		return torch.empty(1, 1, 320, 320)
+		return (torch.empty(1, 1, 320, 320),)
 
 	def gen_calib_data(self, n=100):
-		return torch.randn(n, 1, 1, 320, 320)
+		return [{"inputs": torch.randn(1, 1, 320, 320)} for i in range(n)]
+
+	def input_names(self):
+		return ["inputs"]
+
+	def output_names(self):
+		return ["outputs"]
 
 class SimpleContinuousNet(nn.Module):
 	def __init__(self):
@@ -78,12 +89,21 @@ class SimpleContinuousNet(nn.Module):
 		return self.head(mem)
 
 	def example_inputs(self):
-		return torch.empty(1, 6)
+		return (torch.empty(1, 6),)
 
 	def gen_calib_data(self, n=100):
-		first = torch.randn(n, 1, 4)
-		second = torch.randint(low=0, high=320, size=(n, 1, 2)).float()
-		return torch.cat([first, second], dim=-1)
+		data = list()
+		for i in range(n):
+			first = torch.randn(n, 1, 4)
+			second = torch.randint(low=0, high=320, size=(n, 1, 2)).float()
+			data.append({"inputs": torch.cat([first, second], dim=-1)})
+		return data
+
+	def input_names(self):
+		return ["inputs"]
+
+	def output_names(self):
+		return ["outputs"]
 
 class Simple8DNet(nn.Module):
 	def __init__(self):
@@ -127,10 +147,16 @@ class Simple8DNet(nn.Module):
 		return self.net(x)
 
 	def example_inputs(self):
-		return torch.empty(1, 1, 1, 8, 6)
+		return (torch.empty(1, 1, 1, 8, 6),)
 
 	def gen_calib_data(self, n=100):
-		return torch.randn(n, 1, 1, 1, 8, 6)
+		return [{"inputs": torch.randn(1, 1, 1, 8, 6)} for i in range(n)]
+
+	def input_names(self):
+		return ["inputs"]
+
+	def output_names(self):
+		return ["outputs"]
 
 class SimpleLSTMNet(nn.Module):
 	def __init__(self):
@@ -148,10 +174,16 @@ class SimpleLSTMNet(nn.Module):
 		return self.fc(self.h)
 
 	def example_inputs(self):
-		return torch.empty(1, 16)
+		return (torch.empty(1, 16),)
 
 	def gen_calib_data(self, n=100):
-		return torch.randn(n, 1, 16)
+		return [{"inputs": torch.randn(1, 16)} for i in range(n)]
+
+	def input_names(self):
+		return ["inputs"]
+
+	def output_names(self):
+		return ["outputs"]
 
 
 class BigConvNet(nn.Module):
@@ -182,10 +214,16 @@ class BigConvNet(nn.Module):
 		return self.net(x)
 
 	def example_inputs(self):
-		return torch.empty(1, 1, 320, 320)
+		return (torch.empty(1, 1, 320, 320),)
 
 	def gen_calib_data(self, n=100):
-		return torch.randn(n, 1, 1, 320, 320)
+		return [{"inputs": torch.randn(1, 1, 320, 320)} for i in range(n)]
+
+	def input_names(self):
+		return ["inputs"]
+
+	def output_names(self):
+		return ["outputs"]
 
 class CompleteNet(nn.Module):
 	def __init__(self):
@@ -250,10 +288,152 @@ class CompleteNet(nn.Module):
 		return self.fc(F.relu(h3, inplace=True))
 
 	def example_inputs(self):
-		return torch.empty(1, 1, 320, 320)
+		return (torch.empty(1, 1, 320, 320),)
 
 	def gen_calib_data(self, n=100):
-		return torch.randn(n, 1, 1, 320, 320)
+		return [{"inputs": torch.randn(1, 1, 320, 320)} for i in range(n)]
+
+	def input_names(self):
+		return ["inputs"]
+
+	def output_names(self):
+		return ["outputs"]
+
+class UNet(nn.Module):
+	class ConvLSTM(nn.Module):
+		class ConvLSTMCell(nn.Module):
+			def __init__(self, input_size, hidden_size, kernel_size, bias):
+				super(OrigUNet.ConvLSTM.ConvLSTMCell, self).__init__()
+
+				self.hidden_size = hidden_size
+
+				padding = kernel_size // 2
+
+				self.rescale = nn.Conv2d(input_size, hidden_size, kernel_size=1)
+
+				self.conv_i = nn.Conv2d(hidden_size, hidden_size, kernel_size, padding=padding, bias=bias)
+				self.conv_f = nn.Conv2d(hidden_size, hidden_size, kernel_size, padding=padding, bias=bias)
+				self.conv_o = nn.Conv2d(hidden_size, hidden_size, kernel_size, padding=padding, bias=bias)
+				self.conv_g = nn.Conv2d(hidden_size, hidden_size, kernel_size, padding=padding, bias=bias)
+
+			def forward(self, x, h_prev, s_prev):
+				rescaled = self.rescale(x)
+				comb_input = rescaled + h_prev
+
+				i = torch.sigmoid(self.conv_i(comb_input))
+				f = torch.sigmoid(self.conv_f(comb_input))
+				o = torch.sigmoid(self.conv_o(comb_input))
+				g = torch.relu(self.conv_g(comb_input))
+
+				s_next = f * s_prev + i * g
+				h_next = o * torch.relu(s_next)
+
+				return h_next, s_next
+
+		def __init__(self, num_layers, input_sizes, kernel_sizes, bias, output_size):
+			super(OrigUNet.ConvLSTM, self).__init__()
+
+			if num_layers != len(input_sizes):
+				raise ValueError(f"Number of input sizes ({len(input_sizes)}) must match number of layers ({num_layers})")
+
+			if num_layers != len(kernel_sizes):
+				raise ValueError(f"Number of kernel sizes ({len(kernel_sizes)}) must match number of layers ({num_layers})")
+
+			hidden_sizes = input_sizes + (output_size,)
+
+			cells = list()
+
+			for i in range(num_layers):
+				cells.append(OrigUNet.ConvLSTM.ConvLSTMCell(hidden_sizes[i], hidden_sizes[i+1], kernel_sizes[i], bias))
+
+			self.cells = nn.ModuleList(cells)
+
+		def forward(self, x, *states):
+			new_states = list()
+
+			for i, cell in enumerate(self.cells):
+				h_next, s_next = cell(x, states[2 * i], states[2 * i + 1])
+				new_states.append(h_next)
+				new_states.append(s_next)
+				x = h_next
+
+			return (x, *new_states,)
+
+
+	def __init__(self):
+		super(OrigUNet, self).__init__()
+
+		self.enc = nn.Sequential(
+				nn.Conv2d(1, 8, kernel_size=3, stride=8, padding=1),
+				nn.ReLU(True),
+				nn.Conv2d(8, 16, kernel_size=3, padding=1),
+				nn.ReLU(True),
+		)
+		self.convlstm = OrigUNet.ConvLSTM(2,
+															 (16, 16,),
+															 (3,) * 2,
+															 True,
+															 32)
+		self.dec1 = nn.Sequential(
+				nn.Conv2d(32, 16, kernel_size=3, padding=1),
+				nn.ReLU(True),
+		)
+		self.dec2 = nn.Sequential(
+				nn.Conv2d(16, 8, kernel_size=3, padding=1),
+				nn.ReLU(True),
+		) 
+		self.head = nn.Sequential(
+			nn.AdaptiveAvgPool2d((1, 1)),
+			nn.Flatten(),
+			nn.Linear(8, 3),
+		)
+
+	def forward(self, x, *states):
+		x = self.enc(x)
+		skip = x
+
+		res = self.convlstm(x, *states)
+		x = res[0]
+		states = res[1:]
+
+		x = self.dec1(x)
+		x = x + skip
+		x = self.dec2(x)
+
+		x = self.head(x)
+
+		return (x, *states,)
+
+	def example_inputs(self):
+		return (torch.empty(1, 1, 320, 320),
+						torch.empty(1, 16, 40, 40),
+						torch.empty(1, 16, 40, 40),
+						torch.empty(1, 32, 40, 40),
+						torch.empty(1, 32, 40, 40),
+		)
+
+	def gen_calib_data(self, n=100):
+		data = list()
+		for i in range(n):
+			x = torch.randn(1, 1, 320, 320)
+			h0 = torch.randn(1, 16, 40, 40)
+			s0 = torch.randn(1, 16, 40, 40)
+			h1 = torch.randn(1, 32, 40, 40)
+			s1 = torch.randn(1, 32, 40, 40)
+			data.append({
+				"inputs": x,
+				"h0": h0, 
+				"s0": s0,
+				"h1": h1,
+				"s1": s1
+			})
+		return data
+
+	def input_names(self):
+		return ["inputs", "h0", "s0", "h1", "s1"]
+
+	def output_names(self):
+		return ["h0o", "s0o", "h1o", "s1o"]
 
 net_table = {
 	"SimpleLinear": SimpleLinearNet,
@@ -263,5 +443,5 @@ net_table = {
 	"SimpleLSTM": SimpleLSTMNet,
 	"BigConv": BigConvNet,
 	"Complete": CompleteNet,
-	"OrigUNet": OrigUNet,
+	"OrigUNet": UNet,
 }
