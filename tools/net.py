@@ -360,74 +360,146 @@ class UNet(nn.Module):
 			return (x, *new_states,)
 
 
+	class ResBlock(nn.Module):
+		def __init__(self, in_channels, out_channels):
+			super(UNet.ResBlock, self).__init__()
+
+			self.net = nn.Sequential(
+					nn.Conv2d(in_channels, out_channels, kernel_size=3, stride=2, padding=1),
+
+					nn.Conv2d(out_channels, out_channels, kernel_size=3, padding=1),
+					nn.ReLU(inplace=True),
+					nn.Conv2d(out_channels, out_channels, kernel_size=3, padding=1),
+					nn.ReLU(inplace=True),
+					nn.Conv2d(out_channels, out_channels, kernel_size=3, padding=1),
+					nn.ReLU(inplace=True)
+			)
+
+		def forward(self, x):
+			return self.net(x)
+
+	class ResBlockTranspose(nn.Module):
+		def __init__(self, in_channels, out_channels):
+			super(UNet.ResBlockTranspose, self).__init__()
+
+			self.net = nn.Sequential(
+					nn.ReLU(inplace=True),
+					nn.ConvTranspose2d(in_channels, out_channels, kernel_size=4, stride=2, padding=1),
+
+					nn.Conv2d(out_channels, out_channels, kernel_size=3, padding=1),
+					nn.ReLU(inplace=True),
+					nn.Conv2d(out_channels, out_channels, kernel_size=3, padding=1),
+					nn.ReLU(inplace=True),
+					nn.Conv2d(out_channels, out_channels, kernel_size=3, padding=1)
+			)
+
+		def forward(self, x):
+			return self.net(x)
+
+
 	def __init__(self):
 		super(UNet, self).__init__()
 
-		self.enc1 = nn.Sequential(
-				nn.Conv2d(1, 8, kernel_size=3, stride=4, padding=1),
-				nn.ReLU(True)
-		)
-		self.enc2 = nn.Sequential(
-				nn.Conv2d(8, 16, kernel_size=3, padding=1),
-				nn.ReLU(True)
-		)
+		self.enc1_conv = UNet.ResBlock(1, 16)
+		self.enc2_conv = UNet.ResBlock(16, 32)
+		self.enc3_conv = UNet.ResBlock(32, 64)
+		self.enc4_conv = UNet.ResBlock(64, 128)
 
-		self.convlstm = UNet.ConvLSTM(1,
-															 (16,),
-															 (3,),
-															 True,
-															 16)
+		self.convlstm = UNet.ConvLSTM(4, (128,) * 4, (3,) * 4, True, 128)
 
-		self.dec1 = nn.Sequential(
-				nn.Conv2d(16, 8, kernel_size=3, padding=1),
-				nn.ReLU(True)
-		)
-		self.dec2 = nn.Sequential(
-				nn.ConvTranspose2d(8, 1, kernel_size=2, stride=2),
-				nn.ReLU(True)
+		self.dec4_conv_trans = UNet.ResBlockTranspose(128, 64)
+		self.dec3_conv_trans = UNet.ResBlockTranspose(64, 32)
+		self.dec2_conv_trans = UNet.ResBlockTranspose(32, 16)
+		self.dec1_conv_trans = UNet.ResBlockTranspose(16, 1)
+
+		self.head = nn.Sequential(
+				nn.Conv2d(1, 16, kernel_size=3, padding=1),
+				nn.ReLU(inplace=True),
+				nn.Conv2d(16, 16, kernel_size=3, padding=1),
+				nn.ReLU(inplace=True),
+				nn.Conv2d(16, 16, kernel_size=3, padding=1),
+				nn.ReLU(inplace=True),
+				nn.MaxPool2d(kernel_size=2, stride=2),
+
+				nn.Conv2d(16, 32, kernel_size=3, padding=1),
+				nn.ReLU(inplace=True),
+				nn.Conv2d(32, 32, kernel_size=3, padding=1),
+				nn.ReLU(inplace=True),
+				nn.Conv2d(32, 32, kernel_size=3, padding=1),
+				nn.ReLU(inplace=True),
+				nn.MaxPool2d(kernel_size=2, stride=2),
+
+				nn.Conv2d(32, 64, kernel_size=3, padding=1),
+				nn.ReLU(inplace=True),
+				nn.Conv2d(64, 64, kernel_size=3, padding=1),
+				nn.ReLU(inplace=True),
+				nn.Conv2d(64, 64, kernel_size=3, padding=1),
+				nn.ReLU(inplace=True),
+				nn.MaxPool2d(kernel_size=2, stride=2),
+
+				nn.AdaptiveAvgPool2d((1, 1)),
+				nn.Flatten(),
+				nn.Linear(64, 8),
+				nn.ReLU(inplace=True),
+				nn.Linear(8, 4),
 		)
 
 	def forward(self, x, *states):
-		x = self.enc1(x)
-		skip1 = x
-		x = self.enc2(x)
-		skip2 = x
+		x = skip1 = self.enc1_conv(x)
+		x = skip2 = self.enc2_conv(x)
+		x = skip3 = self.enc3_conv(x)
+		x = skip4 = self.enc4_conv(x)
+		x, *states = self.convlstm(x, *states)
+		x = self.dec4_conv_trans(x + skip4)
+		x = self.dec3_conv_trans(x + skip3)
+		x = self.dec2_conv_trans(x + skip2)
+		x = depth = self.dec1_conv_trans(x + skip1)
+		x = v = self.head(x)
 
-		res = self.convlstm(x, *states)
-		x = res[0]
-		states = res[1:]
-
-		x = x + skip2
-		x = self.dec1(x)
-
-		x = x + skip1
-		x = self.dec2(x)
-		return (x, *states,)
+		return (v, depth, *states,)
 
 	def example_inputs(self):
-		return (torch.empty(1, 1, 320, 320),
-						torch.empty(1, 16, 80, 80),
-						torch.empty(1, 16, 80, 80),
+		return (torch.empty(1, 1, 160, 160),
+						torch.empty(1, 128, 10, 10),
+						torch.empty(1, 128, 10, 10),
+						torch.empty(1, 128, 10, 10),
+						torch.empty(1, 128, 10, 10),
+						torch.empty(1, 128, 10, 10),
+						torch.empty(1, 128, 10, 10),
+						torch.empty(1, 128, 10, 10),
+						torch.empty(1, 128, 10, 10),
 		)
 
 	def gen_calib_data(self, n=100):
 		data = list()
 		for i in range(n):
-			x = torch.randn(1, 1, 320, 320)
-			h0 = torch.randn(1, 16, 80, 80)
-			s0 = torch.randn(1, 16, 80, 80)
+			x = torch.randn(1, 1, 160, 160)
+			h0 = torch.randn(1, 128, 10, 10)
+			s0 = torch.randn(1, 128, 10, 10)
+			h1 = torch.randn(1, 128, 10, 10)
+			s1 = torch.randn(1, 128, 10, 10)
+			h2 = torch.randn(1, 128, 10, 10)
+			s2 = torch.randn(1, 128, 10, 10)
+			h3 = torch.randn(1, 128, 10, 10)
+			s3 = torch.randn(1, 128, 10, 10)
 			data.append({
-				"inputs": x,
+				"bem": x,
 				"h0": h0, 
 				"s0": s0,
+				"h1": h1, 
+				"s1": s1,
+				"h2": h2, 
+				"s2": s2,
+				"h3": h3, 
+				"s3": s3,
 			})
 		return data
 
 	def input_names(self):
-		return ["inputs", "h0", "s0"]
+		return ["bem", "h0", "s0", "h1", "s1", "h2", "s2", "h3", "s3"]
 
 	def output_names(self):
-		return ["outputs", "h0_prev", "s0_prev"]
+		return ["v", "depth", "h0_prev", "s0_prev", "h1_prev", "s1_prev", "h2_prev", "s2_prev", "h3_prev", "s3_prev"]
 
 net_table = {
 	"SimpleLinear": SimpleLinearNet,
