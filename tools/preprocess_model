@@ -5,5 +5,5 @@ if [ "$#" -ne 2 ]; then
 	exit
 fi
 
-python -m onnxruntime.quantization.preprocess --input $1 --output $2
+python -m onnxruntime.quantization.preprocess --input $1 --output $2 || exit
 echo "Model ($1) preprocessed to $2"

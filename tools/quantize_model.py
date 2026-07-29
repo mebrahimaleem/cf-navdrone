@@ -33,7 +33,6 @@ def main():
 		activation_type=QuantType.QInt8,
 		weight_type=QuantType.QInt8,
 		extra_options = {
-			"ConvertNCHWToNHWC": True,
 			"EnableDualQuantNodePairs": True,
 		}
 	)

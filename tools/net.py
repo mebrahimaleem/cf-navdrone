@@ -303,7 +303,7 @@ class UNet(nn.Module):
 	class ConvLSTM(nn.Module):
 		class ConvLSTMCell(nn.Module):
 			def __init__(self, input_size, hidden_size, kernel_size, bias):
-				super(OrigUNet.ConvLSTM.ConvLSTMCell, self).__init__()
+				super(UNet.ConvLSTM.ConvLSTMCell, self).__init__()
 
 				self.hidden_size = hidden_size
 
@@ -331,7 +331,7 @@ class UNet(nn.Module):
 				return h_next, s_next
 
 		def __init__(self, num_layers, input_sizes, kernel_sizes, bias, output_size):
-			super(OrigUNet.ConvLSTM, self).__init__()
+			super(UNet.ConvLSTM, self).__init__()
 
 			if num_layers != len(input_sizes):
 				raise ValueError(f"Number of input sizes ({len(input_sizes)}) must match number of layers ({num_layers})")
@@ -344,7 +344,7 @@ class UNet(nn.Module):
 			cells = list()
 
 			for i in range(num_layers):
-				cells.append(OrigUNet.ConvLSTM.ConvLSTMCell(hidden_sizes[i], hidden_sizes[i+1], kernel_sizes[i], bias))
+				cells.append(UNet.ConvLSTM.ConvLSTMCell(hidden_sizes[i], hidden_sizes[i+1], kernel_sizes[i], bias))
 
 			self.cells = nn.ModuleList(cells)
 
@@ -361,79 +361,73 @@ class UNet(nn.Module):
 
 
 	def __init__(self):
-		super(OrigUNet, self).__init__()
+		super(UNet, self).__init__()
 
-		self.enc = nn.Sequential(
-				nn.Conv2d(1, 8, kernel_size=3, stride=8, padding=1),
-				nn.ReLU(True),
-				nn.Conv2d(8, 16, kernel_size=3, padding=1),
-				nn.ReLU(True),
+		self.enc1 = nn.Sequential(
+				nn.Conv2d(1, 8, kernel_size=3, stride=4, padding=1),
+				nn.ReLU(True)
 		)
-		self.convlstm = OrigUNet.ConvLSTM(2,
-															 (16, 16,),
-															 (3,) * 2,
+		self.enc2 = nn.Sequential(
+				nn.Conv2d(8, 16, kernel_size=3, padding=1),
+				nn.ReLU(True)
+		)
+
+		self.convlstm = UNet.ConvLSTM(1,
+															 (16,),
+															 (3,),
 															 True,
-															 32)
+															 16)
+
 		self.dec1 = nn.Sequential(
-				nn.Conv2d(32, 16, kernel_size=3, padding=1),
-				nn.ReLU(True),
+				nn.Conv2d(16, 8, kernel_size=3, padding=1),
+				nn.ReLU(True)
 		)
 		self.dec2 = nn.Sequential(
-				nn.Conv2d(16, 8, kernel_size=3, padding=1),
-				nn.ReLU(True),
-		) 
-		self.head = nn.Sequential(
-			nn.AdaptiveAvgPool2d((1, 1)),
-			nn.Flatten(),
-			nn.Linear(8, 3),
+				nn.ConvTranspose2d(8, 1, kernel_size=2, stride=2),
+				nn.ReLU(True)
 		)
 
 	def forward(self, x, *states):
-		x = self.enc(x)
-		skip = x
+		x = self.enc1(x)
+		skip1 = x
+		x = self.enc2(x)
+		skip2 = x
 
 		res = self.convlstm(x, *states)
 		x = res[0]
 		states = res[1:]
 
+		x = x + skip2
 		x = self.dec1(x)
-		x = x + skip
+
+		x = x + skip1
 		x = self.dec2(x)
-
-		x = self.head(x)
-
 		return (x, *states,)
 
 	def example_inputs(self):
 		return (torch.empty(1, 1, 320, 320),
-						torch.empty(1, 16, 40, 40),
-						torch.empty(1, 16, 40, 40),
-						torch.empty(1, 32, 40, 40),
-						torch.empty(1, 32, 40, 40),
+						torch.empty(1, 16, 80, 80),
+						torch.empty(1, 16, 80, 80),
 		)
 
 	def gen_calib_data(self, n=100):
 		data = list()
 		for i in range(n):
 			x = torch.randn(1, 1, 320, 320)
-			h0 = torch.randn(1, 16, 40, 40)
-			s0 = torch.randn(1, 16, 40, 40)
-			h1 = torch.randn(1, 32, 40, 40)
-			s1 = torch.randn(1, 32, 40, 40)
+			h0 = torch.randn(1, 16, 80, 80)
+			s0 = torch.randn(1, 16, 80, 80)
 			data.append({
 				"inputs": x,
 				"h0": h0, 
 				"s0": s0,
-				"h1": h1,
-				"s1": s1
 			})
 		return data
 
 	def input_names(self):
-		return ["inputs", "h0", "s0", "h1", "s1"]
+		return ["inputs", "h0", "s0"]
 
 	def output_names(self):
-		return ["h0o", "s0o", "h1o", "s1o"]
+		return ["outputs", "h0_prev", "s0_prev"]
 
 net_table = {
 	"SimpleLinear": SimpleLinearNet,
@@ -443,5 +437,5 @@ net_table = {
 	"SimpleLSTM": SimpleLSTMNet,
 	"BigConv": BigConvNet,
 	"Complete": CompleteNet,
-	"OrigUNet": UNet,
+	"UNet": UNet,
 }
