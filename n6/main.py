@@ -148,6 +148,7 @@ async def pipeline():
 	import csi
 	import time
 	import sys
+	import ml
 
 
 	class PostProcess:
@@ -159,6 +160,20 @@ async def pipeline():
 
 
 	try:
+		model = ml.Model("/rom/model.onnx")
+
+		bem = np.zeros((1, 1, 160, 160))
+		h0 = np.zeros((1, 128, 10, 10))
+		s0 = np.zeros((1, 128, 10, 10))
+		h1 = np.zeros((1, 128, 10, 10))
+		s1 = np.zeros((1, 128, 10, 10))
+		h2 = np.zeros((1, 128, 10, 10))
+		s2 = np.zeros((1, 128, 10, 10))
+		h3 = np.zeros((1, 128, 10, 10))
+		s3 = np.zeros((1, 128, 10, 10))
+
+		# v, depth, h0, s0, h1, s1, h2, s2, h3, s3 = model.predict([bem, h0, s0, h1, s1, h2, s2, h3, s4], postprocess=PostProcess())
+
 		events = np.zeros((2048, 6), dtype=np.uint16)
 		pol = np.zeros((2048), dtype=np.int16)
 
