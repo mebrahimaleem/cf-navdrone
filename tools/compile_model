@@ -9,7 +9,7 @@ mkdir -p $3/compiler/output
 cp conf/neuralart.json $3/compiler
 cp conf/stm32n6.mpool $3/compiler
 cp $1 $3/compiler/model.onnx
-cd $3/compiler && stedgeai generate --model model.onnx --relocatable --target stm32n6 --st-neural-art default@neuralart.json --output output || exit
+cd $3/compiler && stedgeai generate --model model.onnx --relocatable --target stm32n6 --st-neural-art default@neuralart.json --output output --inputs-ch-position chlast --outputs-ch-position chlast --input-data-type uint8 --output-data-type uint8 --verbosity 3 || exit
 cp $3/compiler/output/model_OE_3_3_1.onnx $2 || exit
 
 echo "Model ($1) compiled to $2"

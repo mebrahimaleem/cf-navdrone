@@ -299,11 +299,11 @@ class CompleteNet(nn.Module):
 	def output_names(self):
 		return ["outputs"]
 
-class UNet(nn.Module):
+class ResUNet(nn.Module):
 	class ConvLSTM(nn.Module):
 		class ConvLSTMCell(nn.Module):
 			def __init__(self, input_size, hidden_size, kernel_size, bias):
-				super(UNet.ConvLSTM.ConvLSTMCell, self).__init__()
+				super().__init__()
 
 				self.hidden_size = hidden_size
 
@@ -331,7 +331,7 @@ class UNet(nn.Module):
 				return h_next, s_next
 
 		def __init__(self, num_layers, input_sizes, kernel_sizes, bias, output_size):
-			super(UNet.ConvLSTM, self).__init__()
+			super().__init__()
 
 			if num_layers != len(input_sizes):
 				raise ValueError(f"Number of input sizes ({len(input_sizes)}) must match number of layers ({num_layers})")
@@ -344,7 +344,7 @@ class UNet(nn.Module):
 			cells = list()
 
 			for i in range(num_layers):
-				cells.append(UNet.ConvLSTM.ConvLSTMCell(hidden_sizes[i], hidden_sizes[i+1], kernel_sizes[i], bias))
+				cells.append(ResUNet.ConvLSTM.ConvLSTMCell(hidden_sizes[i], hidden_sizes[i+1], kernel_sizes[i], bias))
 
 			self.cells = nn.ModuleList(cells)
 
@@ -362,10 +362,11 @@ class UNet(nn.Module):
 
 	class ResBlock(nn.Module):
 		def __init__(self, in_channels, out_channels):
-			super(UNet.ResBlock, self).__init__()
+			super().__init__()
 
 			self.net = nn.Sequential(
 					nn.Conv2d(in_channels, out_channels, kernel_size=3, stride=2, padding=1),
+					nn.ReLU(inplace=True),
 
 					nn.Conv2d(out_channels, out_channels, kernel_size=3, padding=1),
 					nn.ReLU(inplace=True),
@@ -379,12 +380,49 @@ class UNet(nn.Module):
 			return self.net(x)
 
 	class ResBlockTranspose(nn.Module):
+		class ConvUpsample(nn.Module):
+			def __init__(self, in_channels, out_channels, kernel_size, upscale_factor, padding):
+				super().__init__()
+
+				self.in_channels = in_channels
+				self.upscale_factor = upscale_factor
+
+				self.upscale = nn.Conv2d(in_channels, in_channels * upscale_factor ** 2, kernel_size=1)
+				self.conv = nn.Conv2d(in_channels, out_channels, kernel_size=kernel_size, padding=padding)
+
+				self.permute_upscale()
+
+			@torch.no_grad()
+			def permute_upscale(self):
+				w = self.upscale.weight.data
+				w = w.reshape(self.in_channels, self.upscale_factor, self.upscale_factor, -1)
+				w = w.permute(0, 2, 1, 3)
+				w = w.reshape(self.in_channels * self.upscale_factor ** 2, -1, 1, 1)
+				self.upscale.weight.data = w
+
+				if self.upscale.bias is not None:
+					b = self.upscale.bias.data
+					b = b.reshape(self.in_channels, self.upscale_factor, self.upscale_factor)
+					b = b.permute(0, 2, 1)
+					b = b.reshape(-1,)
+					self.upscale.bias.data = b
+
+			def forward(self, x):
+				b, _, h, w = x.shape
+
+				x = self.upscale(x)
+				x = x.reshape(b, self.in_channels, h * self.upscale_factor, w * self.upscale_factor)
+				x = self.conv(x)
+
+				return x
+
 		def __init__(self, in_channels, out_channels):
-			super(UNet.ResBlockTranspose, self).__init__()
+			super().__init__()
 
 			self.net = nn.Sequential(
 					nn.ReLU(inplace=True),
-					nn.ConvTranspose2d(in_channels, out_channels, kernel_size=4, stride=2, padding=1),
+					ResUNet.ResBlockTranspose.ConvUpsample(in_channels, out_channels, kernel_size=3, upscale_factor=2, padding=1),
+					nn.ReLU(inplace=True),
 
 					nn.Conv2d(out_channels, out_channels, kernel_size=3, padding=1),
 					nn.ReLU(inplace=True),
@@ -398,19 +436,19 @@ class UNet(nn.Module):
 
 
 	def __init__(self):
-		super(UNet, self).__init__()
+		super().__init__()
 
-		self.enc1_conv = UNet.ResBlock(1, 16)
-		self.enc2_conv = UNet.ResBlock(16, 32)
-		self.enc3_conv = UNet.ResBlock(32, 64)
-		self.enc4_conv = UNet.ResBlock(64, 128)
+		self.enc1_conv = ResUNet.ResBlock(1, 16)
+		self.enc2_conv = ResUNet.ResBlock(16, 32)
+		self.enc3_conv = ResUNet.ResBlock(32, 64)
+		self.enc4_conv = ResUNet.ResBlock(64, 128)
 
-		self.convlstm = UNet.ConvLSTM(4, (128,) * 4, (3,) * 4, True, 128)
+		self.convlstm = ResUNet.ConvLSTM(4, (128,) * 4, (3,) * 4, True, 128)
 
-		self.dec4_conv_trans = UNet.ResBlockTranspose(128, 64)
-		self.dec3_conv_trans = UNet.ResBlockTranspose(64, 32)
-		self.dec2_conv_trans = UNet.ResBlockTranspose(32, 16)
-		self.dec1_conv_trans = UNet.ResBlockTranspose(16, 1)
+		self.dec4_conv_trans = ResUNet.ResBlockTranspose(128, 64)
+		self.dec3_conv_trans = ResUNet.ResBlockTranspose(64, 32)
+		self.dec2_conv_trans = ResUNet.ResBlockTranspose(32, 16)
+		self.dec1_conv_trans = ResUNet.ResBlockTranspose(16, 1)
 
 		self.head = nn.Sequential(
 				nn.Conv2d(1, 16, kernel_size=3, padding=1),
@@ -486,11 +524,11 @@ class UNet(nn.Module):
 				"bem": x,
 				"h0": h0, 
 				"s0": s0,
-				"h1": h1, 
+				"h1": h1,
 				"s1": s1,
-				"h2": h2, 
+				"h2": h2,
 				"s2": s2,
-				"h3": h3, 
+				"h3": h3,
 				"s3": s3,
 			})
 		return data
@@ -509,5 +547,5 @@ net_table = {
 	"SimpleLSTM": SimpleLSTMNet,
 	"BigConv": BigConvNet,
 	"Complete": CompleteNet,
-	"UNet": UNet,
+	"ResUNet": ResUNet,
 }
