@@ -6,20 +6,18 @@ class ConvLSTMCell(nn.Module):
 	def __init__(self, input_size, hidden_size, kernel_size, bias):
 		super().__init__()
 
-		self.hidden_size = hidden_size
-
 		padding = kernel_size // 2
 
 		self.rescale = nn.Conv2d(input_size, hidden_size, kernel_size=1)
 
-		self.conv_i = nn.Conv2d(hidden_size, hidden_size, kernel_size=kernel_size, padding=padding, bias=bias)
-		self.conv_f = nn.Conv2d(hidden_size, hidden_size, kernel_size=kernel_size, padding=padding, bias=bias)
-		self.conv_o = nn.Conv2d(hidden_size, hidden_size, kernel_size=kernel_size, padding=padding, bias=bias)
-		self.conv_g = nn.Conv2d(hidden_size, hidden_size, kernel_size=kernel_size, padding=padding, bias=bias)
+		self.conv_i = nn.Conv2d(hidden_size + input_size, hidden_size, kernel_size=kernel_size, padding=padding, bias=bias)
+		self.conv_f = nn.Conv2d(hidden_size + input_size, hidden_size, kernel_size=kernel_size, padding=padding, bias=bias)
+		self.conv_o = nn.Conv2d(hidden_size + input_size, hidden_size, kernel_size=kernel_size, padding=padding, bias=bias)
+		self.conv_g = nn.Conv2d(hidden_size + input_size, hidden_size, kernel_size=kernel_size, padding=padding, bias=bias)
 
 	def forward(self, x, h_prev, s_prev):
 		rescaled = self.rescale(x)
-		comb_input = rescaled + h_prev
+		comb_input = torch.cat([rescaled, h_prev], 1)
 
 		i = torch.sigmoid(self.conv_i(comb_input))
 		f = torch.sigmoid(self.conv_f(comb_input))
@@ -68,7 +66,7 @@ class FastConvTranspose2d(nn.Module):
 		self.in_channels = in_channels
 		self.stride = stride
 
-		self.spatial_mix = nn.Conv2d(in_channels, in_channels, kernel_size=kernel_size, padding=padding)
+		self.spatial_mix = nn.Conv2d(in_channels, in_channels, kernel_size=3, padding=1)
 		self.upscale = nn.Conv2d(in_channels, in_channels * stride ** 2, kernel_size=1)
 		self.conv = nn.Conv2d(in_channels, out_channels, kernel_size=kernel_size, padding=padding)
 
@@ -103,11 +101,12 @@ class Net(nn.Module):
 	def __init__(self):
 		super().__init__()
 
-		# Nx2x320x320
+		# Nx1x320x320
+		self.channel_split = nn.Conv2d(1, 2, kernel_size=1, padding=0, bias=True)
 		self.downsample = nn.MaxPool2d(kernel_size=2, stride=2)
 
-		# Nx2x160x160
-		self.enc11 = nn.Conv2d(1, 16, kernel_size=3, padding=1, stride=2)
+		# Nx1x160x160
+		self.enc11 = nn.Conv2d(2, 16, kernel_size=3, padding=1, stride=2)
 		# Nx16x80x80
 		self.enc12 = nn.Conv2d(16, 16, kernel_size=3, padding=1)
 		# Nx16x80x80
@@ -138,21 +137,21 @@ class Net(nn.Module):
 		# Nx128x10x10
 		self.dec41 = FastConvTranspose2d(128, 64, kernel_size=3, stride=2, padding=1)
 		# Nx64x20x20
-		self.dec42 = nn.Conv2d(64, 64, kernel_size=3, padding=1)
+		self.dec42 = nn.Conv2d(64 + 64, 64, kernel_size=3, padding=1)
 		# Nx64x20x20
 		self.dec43 = nn.Conv2d(64, 64, kernel_size=3, padding=1)
 
 		# Nx64x20x20
 		self.dec31 = FastConvTranspose2d(64, 32, kernel_size=3, stride=2, padding=1)
 		# Nx32x40x40
-		self.dec32 = nn.Conv2d(32, 32, kernel_size=3, padding=1)
+		self.dec32 = nn.Conv2d(32 + 32, 32, kernel_size=3, padding=1)
 		# Nx32x40x40
 		self.dec33 = nn.Conv2d(32, 32, kernel_size=3, padding=1)
 
 		# Nx32x40x40
 		self.dec21 = FastConvTranspose2d(32, 16, kernel_size=3, stride=2, padding=1)
 		# Nx16x80x80
-		self.dec22 = nn.Conv2d(16, 16, kernel_size=3, padding=1)
+		self.dec22 = nn.Conv2d(16 + 16, 16, kernel_size=3, padding=1)
 		# Nx16x80x80
 		self.dec23 = nn.Conv2d(16, 16, kernel_size=3, padding=1)
 
@@ -162,6 +161,7 @@ class Net(nn.Module):
 		self.dec12 = FastConvTranspose2d(8, 1, kernel_size=3, stride=2, padding=1)
 		# Nx1x160x160
 
+		# TODO: maybe share latent from encoder
 		# Nx1x160x160
 		self.vel_head = nn.Sequential(
 			nn.Conv2d(1, 16, kernel_size=3, padding=1, stride=2),
@@ -173,9 +173,9 @@ class Net(nn.Module):
 			nn.ReLU(inplace=True),
 			nn.MaxPool2d(kernel_size=2, stride=2),
 
-			# Nx16x20x20
+			# Nx16x40x40
 			nn.Conv2d(16, 64, kernel_size=3, padding=1),
-			# Nx64x20x20
+			# Nx64x40x40
 			nn.ReLU(inplace=True),
 			nn.Conv2d(64, 64, kernel_size=3, padding=1),
 			nn.ReLU(inplace=True),
@@ -183,9 +183,9 @@ class Net(nn.Module):
 			nn.ReLU(inplace=True),
 			nn.MaxPool2d(kernel_size=2, stride=2),
 
-			# Nx64x10x10
+			# Nx64x20x20
 			nn.Conv2d(64, 128, kernel_size=3, padding=1),
-			# Nx128x10x10
+			# Nx128x20x20
 			nn.ReLU(inplace=True),
 			nn.Conv2d(128, 128, kernel_size=3, padding=1),
 			nn.ReLU(inplace=True),
@@ -201,6 +201,7 @@ class Net(nn.Module):
 		)
 
 	def forward(self, x, *states):
+		x = self.channel_split(x)
 		x = self.downsample(x)
 
 		x = self.enc11(x)
@@ -230,7 +231,7 @@ class Net(nn.Module):
 
 		x = self.dec41(x)
 		x = F.relu(x, inplace=True)
-		x = x + skip4
+		x = torch.cat([x, skip4], dim=1)
 		x = self.dec42(x)
 		x = F.relu(x, inplace=True)
 		x = self.dec43(x)
@@ -238,7 +239,7 @@ class Net(nn.Module):
 
 		x = self.dec31(x)
 		x = F.relu(x, inplace=True)
-		x = x + skip3
+		x = torch.cat([x, skip3], dim=1)
 		x = self.dec32(x)
 		x = F.relu(x, inplace=True)
 		x = self.dec33(x)
@@ -246,7 +247,7 @@ class Net(nn.Module):
 
 		x = self.dec21(x)
 		x = F.relu(x, inplace=True)
-		x = x + skip2
+		x = torch.cat([x, skip2], dim=1)
 		x = self.dec22(x)
 		x = F.relu(x, inplace=True)
 		x = self.dec23(x)
@@ -301,5 +302,5 @@ class Net(nn.Module):
 		return ["bem", "h0", "s0", "h1", "s1", "h2", "s2", "h3", "s3"]
 
 	def output_names(self):
-		return ["vel", "depth", "h0_prev", "s0_prev", "h1_prev", "s1_prev", "h2_prev", "s2_prev", "h3_prev", "s3_prev"]
+		return ["vel", "depth", "h0_next", "s0_next", "h1_next", "s1_next", "h2_next", "s2_next", "h3_next", "s3_next"]
 
