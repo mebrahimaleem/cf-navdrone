@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from netfinal import Net as FinalNet
 
 class SimpleLinearNet(nn.Module):
 	def __init__(self):
@@ -548,4 +549,5 @@ net_table = {
 	"BigConv": BigConvNet,
 	"Complete": CompleteNet,
 	"ResUNet": ResUNet,
+	"Final": FinalNet
 }
