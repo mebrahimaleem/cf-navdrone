@@ -60,114 +60,6 @@ class ConvLSTM(nn.Module):
 
 		return (x, *new_states,)
 
-class FastPixelShuffle2(nn.Module):
-	def __init__(self):
-		super().__init__()
-
-	def forward(self, x):
-		N, C, H, W = x.shape
-
-		out_channels = C // 4
-
-		c1 = x[:, 0::4, :, :]
-		c2 = x[:, 1::4, :, :]
-		c3 = x[:, 2::4, :, :]
-		c4 = x[:, 3::4, :, :]
-
-		c1_r = c1.reshape(N, out_channels, H, W, 1)
-		c2_r = c2.reshape(N, out_channels, H, W, 1)
-		r1 = torch.cat([c1_r, c2_r], dim=4).reshape(N, out_channels, H, W * 2)
-
-		c3_r = c3.reshape(N, out_channels, H, W, 1)
-		c4_r = c4.reshape(N, out_channels, H, W, 1)
-		r2 = torch.cat([c3_r, c4_r], dim=4).reshape(N, out_channels, H, W * 2)
-
-		r1_flat = r1.reshape(N, out_channels, H, 1, W * 2)
-		r2_flat = r2.reshape(N, out_channels, H, 1, W * 2)
-
-		g = torch.cat([r1_flat, r2_flat], dim=3).reshape(N, out_channels, H * 2, W * 2)
-
-		return g
-
-def _test_FastPixelShuffle2():
-	fast = FastPixelShuffle2()
-	ref = nn.PixelShuffle(2)
-
-	x = torch.randn(10, 8, 16, 16)
-
-	x_fast = fast(x)
-	x_ref = ref(x)
-
-	assert torch.allclose(x_ref, x_fast, atol=1e-6), f"Bad FastPixelShuffle2: max error: {(x_ref - x_fast).abs().max()}"
-
-_test_FastPixelShuffle2()
-
-class FastPixelShuffle4(nn.Module):
-	def __init__(self):
-		super().__init__()
-
-	def forward(self, x):
-		N, C, H, W = x.shape
-
-		out_channels = C // 16
-
-		slices = [x[:, i::16, :, :] for i in range(16)]
-		c = [i.reshape(N, out_channels, H, W, 1) for i in slices]
-		r = [torch.cat(c[i:i+4], dim=4).reshape(N, out_channels, H, W * 4) for i in range(0, 16, 4)]
-		r_flat = [i.reshape(N, out_channels, H, 1, W * 4,) for i in r]
-		g = torch.cat(r_flat, dim=3).reshape(N, out_channels, H * 4, W * 4)
-
-		return g
-
-def _test_FastPixelShuffle4():
-	fast = FastPixelShuffle4()
-	ref = nn.PixelShuffle(4)
-
-	x = torch.randn(10, 32, 16, 16)
-
-	x_fast = fast(x)
-	x_ref = ref(x)
-
-	assert torch.allclose(x_ref, x_fast, atol=1e-6), f"Bad FastPixelShuffle4: max error: {(x_ref - x_fast).abs().max()}"
-
-_test_FastPixelShuffle4()
-
-
-class FastPixelShuffle(nn.Module):
-	def __init__(self, upscale_factor):
-		super().__init__()
-
-		if upscale_factor == 2:
-			self.net = FastPixelShuffle2()
-		elif upscale_factor == 4:
-			self.net = FastPixelShuffle4()
-		else:
-			raise RuntimeError(f"No implemented fast pixel shuffle for upscale factor of {upscale_factor}")
-
-	def forward(self, x):
-		return self.net(x)
-
-class FastUpsampleConv2d(nn.Module):
-	def __init__(self, in_channels, out_channels, kernel_size, stride, padding):
-		super().__init__()
-
-		self.in_channels = in_channels
-		self.stride = stride
-
-		self.upscale = nn.Conv2d(in_channels, in_channels * stride ** 2, kernel_size=3, padding=1)
-		self.shuffle = FastPixelShuffle(stride)
-		self.conv = nn.Conv2d(in_channels, out_channels, kernel_size=kernel_size, padding=padding)
-
-	def forward(self, x):
-		b, _, h, w = x.shape
-
-		x = self.upscale(x)
-		x = F.relu(x, inplace=True)
-		x = self.shuffle(x)
-		x = self.conv(x)
-
-		return x
-
 class VelPred(nn.Module):
 	def __init__(self, in_channels):
 		super().__init__()
@@ -191,7 +83,7 @@ class VelPred(nn.Module):
 
 
 class Net(nn.Module):
-	def __init__(self, generate_depthmap=True, train_unet=False, train_velpred=False):
+	def __init__(self, generate_vel=True, generate_depthmap=True, train_unet=False, train_velpred=False):
 		super().__init__()
 
 		# Nx1x320x320
@@ -223,21 +115,21 @@ class Net(nn.Module):
 
 		if generate_depthmap:
 			# Nx128x10x10
-			self.dec11 = FastUpsampleConv2d(128, 64, kernel_size=3, stride=2, padding=1)
+			self.dec11 = nn.ConvTranspose2d(128, 64, kernel_size=2, stride=2)
 			# Nx64x20x20
 			# skip cat Nx128x20x20
 			self.dec12 = nn.Conv2d(128, 64, kernel_size=3, padding=1)
 			self.dec13 = nn.Conv2d(64, 64, kernel_size=3, padding=1)
 
 			# Nx64x20x20
-			self.dec21 = FastUpsampleConv2d(64, 32, kernel_size=3, stride=2, padding=1)
+			self.dec21 = nn.ConvTranspose2d(64, 32, kernel_size=2, stride=2)
 			# Nx32x40x40
 			# skip cat Nx64x40x40
 			self.dec22 = nn.Conv2d(64, 32, kernel_size=3, padding=1)
 			self.dec23 = nn.Conv2d(32, 32, kernel_size=3, padding=1)
 
 			# Nx32x40x40
-			self.dec31 = FastUpsampleConv2d(32, 16, kernel_size=3, stride=2, padding=1)
+			self.dec31 = nn.ConvTranspose2d(32, 16, kernel_size=2, stride=2)
 			# Nx16x80x80
 			# skip cat Nx32x80x80
 			self.dec32 = nn.Conv2d(32, 16, kernel_size=3, padding=1)
@@ -246,13 +138,15 @@ class Net(nn.Module):
 			# Nx16x80x80
 			self.dec41 = nn.Conv2d(16, 4, kernel_size=3, padding=0)
 			# Nx4x80x80
-			self.dec42 = FastUpsampleConv2d(4, 1, kernel_size=3, stride=4, padding=1)
+			self.dec42 = nn.ConvTranspose2d(4, 1, kernel_size=4, stride=4)
 			# Nx1x320x320
 
-		# skip from latent
-		# Nx128x10x10
-		self.vel_head = VelPred(128)
+		if generate_vel:
+			# skip from latent
+			# Nx128x10x10
+			self.vel_head = VelPred(128)
 
+		self.generate_vel = generate_vel
 		self.generate_depthmap = generate_depthmap
 
 		if not train_unet:
@@ -274,8 +168,9 @@ class Net(nn.Module):
 						param.requires_grad = False
 
 		if not train_velpred:
-			for param in self.vel_head.parameters():
-				param.requires_grad = False
+			if generate_vel:
+				for param in self.vel_head.parameters():
+					param.requires_grad = False
 
 	def forward(self, x, *states):
 		x = self.enc11(x)
@@ -332,10 +227,11 @@ class Net(nn.Module):
 			x = self.dec41(x)
 			x = F.relu(x, inplace=True)
 			x = depth = self.dec42(x)
+		
+		if self.generate_vel:
+			x = vel = self.vel_head(latent)
 
-		x = vel = self.vel_head(latent)
-
-		return (vel,) + ((depth,) if self.generate_depthmap else ()), (*states,)
+		return (vel,) if self.generate_vel else () + (depth,) if self.generate_depthmap else (), (*states,)
 
 	def example_inputs(self):
 		return (torch.empty(1, 1, 320, 320),
@@ -378,7 +274,7 @@ class Net(nn.Module):
 		return ["bem", "h0", "s0", "h1", "s1", "h2", "s2", "h3", "s3"]
 
 	def output_names(self):
-		return ["vel"] + \
+		return ["vel"] if self.generate_vel else [] + \
 					 ["depth"] if self.generate_depthmap else [] + \
 					 ["h0_next", "s0_next", "h1_next", "s1_next", "h2_next", "s2_next", "h3_next", "s3_next"]
 
