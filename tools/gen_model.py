@@ -37,7 +37,7 @@ def main():
 			input_names=torch_model.input_names(),
 			output_names=torch_model.output_names(),
 			export_params=True,
-			opset_version=13
+			opset_version=13,
 		)
 
 	print(f"Model ({sys.argv[1]}) saved to {sys.argv[2]}")

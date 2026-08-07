@@ -1,3 +1,4 @@
+import copy
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -19,13 +20,13 @@ class ConvLSTMCell(nn.Module):
 		rescaled = self.rescale(x)
 		comb_input = torch.cat([rescaled, h_prev], 1)
 
-		i = torch.sigmoid(self.conv_i(comb_input))
-		f = torch.sigmoid(self.conv_f(comb_input))
-		o = torch.sigmoid(self.conv_o(comb_input))
-		g = torch.relu(self.conv_g(comb_input))
+		i = F.sigmoid(self.conv_i(comb_input))
+		f = F.sigmoid(self.conv_f(comb_input))
+		o = F.sigmoid(self.conv_o(comb_input))
+		g = F.relu(self.conv_g(comb_input), inplace=True)
 
 		s_next = f * s_prev + i * g
-		h_next = o * torch.relu(s_next)
+		h_next = o * F.relu(s_next, inplace=True)
 
 		return h_next, s_next
 
@@ -59,56 +60,88 @@ class ConvLSTM(nn.Module):
 
 		return (x, *new_states,)
 
-class FastConvTranspose2d(nn.Module):
+class FastPixelShuffle(nn.Module):
+	def __init__(self, upscale_factor):
+		super().__init__()
+
+		self.upscale_factor = upscale_factor
+
+	def forward(self, x):
+		N, C, W, H = x.shape
+
+		out_channels = C // (self.upscale_factor ** 2)
+		
+		x = x.view(N, out_channels, self.upscale_factor, self.upscale_factor, H, W)
+		x = x.permute(0, 1, 4, 2, 5, 3)
+		x = x.contiguous().view(N, out_channels, H * self.upscale_factor, W * self.upscale_factor)
+		
+		return x
+
+def _test_FastPixelShuffle():
+	fast = FastPixelShuffle(2)
+	ref = nn.PixelShuffle(2)
+
+	x = torch.randn(10, 8, 16, 16)
+
+	x_fast = fast(x)
+	x_ref = ref(x)
+
+	assert torch.allclose(x_ref, x_fast, atol=1e-6), f"max error: {(x_ref - x_fast).abs().max()}"
+
+_test_FastPixelShuffle()
+
+
+class FastUpsampleConv2d(nn.Module):
 	def __init__(self, in_channels, out_channels, kernel_size, stride, padding):
 		super().__init__()
 
 		self.in_channels = in_channels
 		self.stride = stride
 
-		self.spatial_mix = nn.Conv2d(in_channels, in_channels, kernel_size=3, padding=1)
-		self.upscale = nn.Conv2d(in_channels, in_channels * stride ** 2, kernel_size=1)
+		self.upscale = nn.Conv2d(in_channels, in_channels * stride ** 2, kernel_size=3, padding=1)
+		self.shuffle = FastPixelShuffle(stride)
 		self.conv = nn.Conv2d(in_channels, out_channels, kernel_size=kernel_size, padding=padding)
-
-		self.permute_upscale()
-
-	@torch.no_grad()
-	def permute_upscale(self):
-		w = self.upscale.weight.data
-		w = w.reshape(self.in_channels, self.stride, self.stride, -1)
-		w = w.permute(0, 2, 1, 3)
-		w = w.reshape(self.in_channels * self.stride ** 2, -1, 1, 1)
-		self.upscale.weight.data = w
-
-		if self.upscale.bias is not None:
-			b = self.upscale.bias.data
-			b = b.reshape(self.in_channels, self.stride, self.stride)
-			b = b.permute(0, 2, 1)
-			b = b.reshape(-1)
-			self.upscale.bias.data = b
 
 	def forward(self, x):
 		b, _, h, w = x.shape
 
-		x = self.spatial_mix(x)
 		x = self.upscale(x)
-		x = x.reshape(b, self.in_channels, h * self.stride, w * self.stride)
+		x = F.relu(x, inplace=True)
+		x = self.shuffle(x)
 		x = self.conv(x)
 
 		return x
 
+class VelPred(nn.Module):
+	def __init__(self, in_channels):
+		super().__init__()
+
+		# NxCxHxW
+		self.net = nn.Sequential(
+			nn.AdaptiveAvgPool2d((1, 1)),
+
+			# NxCx1x1
+			nn.Flatten(),
+			# NxC
+			nn.Linear(in_channels, 16),
+			# Nx16
+			nn.ReLU(inplace=True),
+			nn.Linear(16, 4)
+			# Nx4
+		)
+
+	def forward(self, x):
+		return self.net(x)
+
+
 class Net(nn.Module):
-	def __init__(self):
+	def __init__(self, generate_depthmap=True, train_unet=False, train_velpred=False):
 		super().__init__()
 
 		# Nx1x320x320
-		self.channel_split = nn.Conv2d(1, 2, kernel_size=1, padding=0, bias=True)
-		self.downsample = nn.MaxPool2d(kernel_size=2, stride=2)
-
-		# Nx1x160x160
-		self.enc11 = nn.Conv2d(2, 16, kernel_size=3, padding=1, stride=2)
-		# Nx16x80x80
-		self.enc12 = nn.Conv2d(16, 16, kernel_size=3, padding=1)
+		self.enc11 = nn.Conv2d(1, 4, kernel_size=3, padding=1, stride=4)
+		# Nx4x80x80
+		self.enc12 = nn.Conv2d(4, 16, kernel_size=3, padding=1)
 		# Nx16x80x80
 		self.enc13 = nn.MaxPool2d(kernel_size=2, stride=2)
 
@@ -116,14 +149,12 @@ class Net(nn.Module):
 		self.enc21 = nn.Conv2d(16, 32, kernel_size=3, padding=1)
 		# Nx32x40x40
 		self.enc22 = nn.Conv2d(32, 32, kernel_size=3, padding=1)
-		# Nx32x40x40
 		self.enc23 = nn.MaxPool2d(kernel_size=2, stride=2)
 
 		# Nx32x20x20
 		self.enc31 = nn.Conv2d(32, 64, kernel_size=3, padding=1)
 		# Nx64x20x20
 		self.enc32 = nn.Conv2d(64, 64, kernel_size=3, padding=1)
-		# Nx64x20x20
 		self.enc33 = nn.MaxPool2d(kernel_size=2, stride=2)
 
 		# Nx64x10x10
@@ -134,76 +165,63 @@ class Net(nn.Module):
 		# Nx128x10x10
 		self.bottleneck = ConvLSTM(4, (128,) * 4, (3,) * 4, True, 128)
 
-		# Nx128x10x10
-		self.dec41 = FastConvTranspose2d(128, 64, kernel_size=3, stride=2, padding=1)
-		# Nx64x20x20
-		self.dec42 = nn.Conv2d(64 + 64, 64, kernel_size=3, padding=1)
-		# Nx64x20x20
-		self.dec43 = nn.Conv2d(64, 64, kernel_size=3, padding=1)
-
-		# Nx64x20x20
-		self.dec31 = FastConvTranspose2d(64, 32, kernel_size=3, stride=2, padding=1)
-		# Nx32x40x40
-		self.dec32 = nn.Conv2d(32 + 32, 32, kernel_size=3, padding=1)
-		# Nx32x40x40
-		self.dec33 = nn.Conv2d(32, 32, kernel_size=3, padding=1)
-
-		# Nx32x40x40
-		self.dec21 = FastConvTranspose2d(32, 16, kernel_size=3, stride=2, padding=1)
-		# Nx16x80x80
-		self.dec22 = nn.Conv2d(16 + 16, 16, kernel_size=3, padding=1)
-		# Nx16x80x80
-		self.dec23 = nn.Conv2d(16, 16, kernel_size=3, padding=1)
-
-		# Nx16x80x80
-		self.dec11 = nn.Conv2d(16, 8, kernel_size=1, padding=0)
-		# Nx8x80x80
-		self.dec12 = FastConvTranspose2d(8, 1, kernel_size=3, stride=2, padding=1)
-		# Nx1x160x160
-
-		# TODO: maybe share latent from encoder
-		# Nx1x160x160
-		self.vel_head = nn.Sequential(
-			nn.Conv2d(1, 16, kernel_size=3, padding=1, stride=2),
-			# Nx16x80x80
-			nn.ReLU(inplace=True),
-			nn.Conv2d(16, 16, kernel_size=3, padding=1),
-			nn.ReLU(inplace=True),
-			nn.Conv2d(16, 16, kernel_size=3, padding=1),
-			nn.ReLU(inplace=True),
-			nn.MaxPool2d(kernel_size=2, stride=2),
-
-			# Nx16x40x40
-			nn.Conv2d(16, 64, kernel_size=3, padding=1),
-			# Nx64x40x40
-			nn.ReLU(inplace=True),
-			nn.Conv2d(64, 64, kernel_size=3, padding=1),
-			nn.ReLU(inplace=True),
-			nn.Conv2d(64, 64, kernel_size=3, padding=1),
-			nn.ReLU(inplace=True),
-			nn.MaxPool2d(kernel_size=2, stride=2),
+		if generate_depthmap:
+			# Nx128x10x10
+			self.dec11 = FastUpsampleConv2d(128, 64, kernel_size=3, stride=2, padding=1)
+			# Nx64x20x20
+			# skip cat Nx128x20x20
+			self.dec12 = nn.Conv2d(128, 64, kernel_size=3, padding=1)
+			self.dec13 = nn.Conv2d(64, 64, kernel_size=3, padding=1)
 
 			# Nx64x20x20
-			nn.Conv2d(64, 128, kernel_size=3, padding=1),
-			# Nx128x20x20
-			nn.ReLU(inplace=True),
-			nn.Conv2d(128, 128, kernel_size=3, padding=1),
-			nn.ReLU(inplace=True),
-			nn.Conv2d(128, 128, kernel_size=3, padding=1),
-			nn.ReLU(inplace=True),
-			nn.AdaptiveAvgPool2d((1, 1)),
+			self.dec21 = FastUpsampleConv2d(64, 32, kernel_size=3, stride=2, padding=1)
+			# Nx32x40x40
+			# skip cat Nx64x40x40
+			self.dec22 = nn.Conv2d(64, 32, kernel_size=3, padding=1)
+			self.dec23 = nn.Conv2d(32, 32, kernel_size=3, padding=1)
 
-			# Nx128x1x1
-			nn.Flatten(),
-			nn.Linear(128, 16),
-			nn.ReLU(inplace=True),
-			nn.Linear(16, 4)
-		)
+			# Nx32x40x40
+			self.dec31 = FastUpsampleConv2d(32, 16, kernel_size=3, stride=2, padding=1)
+			# Nx16x80x80
+			# skip cat Nx32x80x80
+			self.dec32 = nn.Conv2d(32, 16, kernel_size=3, padding=1)
+			self.dec33 = nn.Conv2d(16, 16, kernel_size=3, padding=1)
+
+			# Nx16x80x80
+			self.dec41 = nn.Conv2d(16, 4, kernel_size=3, padding=0)
+			# Nx4x80x80
+			self.dec42 = FastUpsampleConv2d(4, 1, kernel_size=3, stride=4, padding=1)
+			# Nx1x320x320
+
+		# skip from latent
+		# Nx128x10x10
+		self.vel_head = VelPred(128)
+
+		self.generate_depthmap = generate_depthmap
+
+		if not train_unet:
+			for module in (self.enc11, self.enc12, self.enc13,
+								 		self.enc21, self.enc22, self.enc23,
+								 		self.enc31, self.enc32, self.enc33,
+								 		self.enc41, self.enc42,
+								 		self.bottleneck):
+				for param in module.parameters():
+					param.requires_grad = False
+			
+			if generate_depthmap:
+				for module in (self.dec11, self.dec12, self.dec13,
+											self.dec21, self.dec22, self.dec23,
+											self.dec31, self.dec32, self.dec33,
+											self.dec41, self.dec42,
+											self.bottleneck):
+					for param in module.parameters():
+						param.requires_grad = False
+
+		if not train_velpred:
+			for param in self.vel_head.parameters():
+				param.requires_grad = False
 
 	def forward(self, x, *states):
-		x = self.channel_split(x)
-		x = self.downsample(x)
-
 		x = self.enc11(x)
 		x = F.relu(x, inplace=True)
 		x = self.enc12(x)
@@ -228,38 +246,40 @@ class Net(nn.Module):
 		x = F.relu(x, inplace=True)
 
 		x, *states = self.bottleneck(x, *states)
+		latent = x
 
-		x = self.dec41(x)
-		x = F.relu(x, inplace=True)
-		x = torch.cat([x, skip4], dim=1)
-		x = self.dec42(x)
-		x = F.relu(x, inplace=True)
-		x = self.dec43(x)
-		x = F.relu(x, inplace=True)
+		if self.generate_depthmap:
+			x = self.dec11(x)
+			x = F.relu(x, inplace=True)
+			x = torch.cat([x, skip4], dim=1)
+			x = self.dec12(x)
+			x = F.relu(x, inplace=True)
+			x = self.dec13(x)
+			x = F.relu(x, inplace=True)
 
-		x = self.dec31(x)
-		x = F.relu(x, inplace=True)
-		x = torch.cat([x, skip3], dim=1)
-		x = self.dec32(x)
-		x = F.relu(x, inplace=True)
-		x = self.dec33(x)
-		x = F.relu(x, inplace=True)
+			x = self.dec21(x)
+			x = F.relu(x, inplace=True)
+			x = torch.cat([x, skip3], dim=1)
+			x = self.dec22(x)
+			x = F.relu(x, inplace=True)
+			x = self.dec23(x)
+			x = F.relu(x, inplace=True)
 
-		x = self.dec21(x)
-		x = F.relu(x, inplace=True)
-		x = torch.cat([x, skip2], dim=1)
-		x = self.dec22(x)
-		x = F.relu(x, inplace=True)
-		x = self.dec23(x)
-		x = F.relu(x, inplace=True)
+			x = self.dec31(x)
+			x = F.relu(x, inplace=True)
+			x = torch.cat([x, skip2], dim=1)
+			x = self.dec32(x)
+			x = F.relu(x, inplace=True)
+			x = self.dec33(x)
+			x = F.relu(x, inplace=True)
 
-		x = self.dec11(x)
-		x = F.relu(x, inplace=True)
-		x = depth = self.dec12(x)
+			x = self.dec41(x)
+			x = F.relu(x, inplace=True)
+			x = depth = self.dec42(x)
 
-		x = vel = self.vel_head(x)
+		x = vel = self.vel_head(latent)
 
-		return (vel, depth, *states,)
+		return (vel,) + ((depth,) if self.generate_depthmap else ()), (*states,)
 
 	def example_inputs(self):
 		return (torch.empty(1, 1, 320, 320),
@@ -302,5 +322,7 @@ class Net(nn.Module):
 		return ["bem", "h0", "s0", "h1", "s1", "h2", "s2", "h3", "s3"]
 
 	def output_names(self):
-		return ["vel", "depth", "h0_next", "s0_next", "h1_next", "s1_next", "h2_next", "s2_next", "h3_next", "s3_next"]
+		return ["vel"] + \
+					 ["depth"] if self.generate_depthmap else [] + \
+					 ["h0_next", "s0_next", "h1_next", "s1_next", "h2_next", "s2_next", "h3_next", "s3_next"]
 
