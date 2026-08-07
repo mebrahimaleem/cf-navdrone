@@ -1,23 +1,51 @@
 #!/bin/env bash
 
-if [ "$#" -ne 2 ]; then
-	echo "usage: $0 model output"
-	exit
+function usage {
+	echo "usage: $0 -m model -o output [-c] [-a artifacts]"
+	exit 1
+}
+
+while getopts "m:o:ca:" flag; do
+	case "${flag}" in
+		m) model="$OPTARG" ;;
+		o) output="$OPTARG" ;;
+		c) compile=true ;;
+		a) artifacts="$OPTARG" ;;
+		*) usage ;;
+	esac
+done
+
+if ! [[ -v model && -v output ]]; then
+	usage
 fi
 
 TEMP_DIR=$(mktemp -d)
 trap "echo Cleaning up... && rm -rdf $TEMP_DIR && echo Done" EXIT
 
-echo Generating model...
-./tools/gen_model.py $1 $TEMP_DIR/1.onnx $TEMP_DIR/calib.pt || exit
-echo Inlining model...
-./tools/inline_model.py $TEMP_DIR/1.onnx $TEMP_DIR/2.onnx || exit
-echo Preprocessing model...
-./tools/preprocess_model $TEMP_DIR/2.onnx $TEMP_DIR/3.onnx || exit
-echo Simplifying model...
-./tools/simplify_model.py $TEMP_DIR/3.onnx $TEMP_DIR/4.onnx || exit
-echo Quantizing model...
-./tools/quantize_model.py $TEMP_DIR/4.onnx $TEMP_DIR/5.onnx $TEMP_DIR/calib.pt || exit
-cp $TEMP_DIR/5.onnx $2
-echo "Compiling model (dry)..."
-./tools/compile_model $TEMP_DIR/5.onnx $TEMP_DIR/6.onnx $TEMP_DIR || exit
+echo "Generating model..."
+./tools/gen_model.py $model $TEMP_DIR/1.onnx $TEMP_DIR/calib.pt || exit 1
+
+echo "Inlining model..."
+./tools/inline_model.py $TEMP_DIR/1.onnx $TEMP_DIR/2.onnx || exit 1
+
+echo "Simplifying model..."
+./tools/simplify_model.py $TEMP_DIR/2.onnx $TEMP_DIR/3.onnx || exit 1
+
+echo "Preprocessing model..."
+./tools/preprocess_model $TEMP_DIR/3.onnx $TEMP_DIR/4.onnx || exit 1
+
+echo "Quantizing model..."
+./tools/quantize_model.py $TEMP_DIR/4.onnx $TEMP_DIR/5.onnx $TEMP_DIR/calib.pt || exit 1
+
+cp $TEMP_DIR/5.onnx $output
+echo "Model saved to $output"
+
+if [ -v compile ]; then
+	echo "Compiling model (dry)..."
+	./tools/compile_model $TEMP_DIR/5.onnx $TEMP_DIR/6.onnx $TEMP_DIR || exit 1
+fi
+
+if [ -v artifacts ]; then
+	echo "Saving artifacts to $artifacts"
+	tar -cf $artifacts $TEMP_DIR
+fi

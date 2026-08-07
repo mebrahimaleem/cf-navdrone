@@ -60,25 +60,37 @@ class ConvLSTM(nn.Module):
 
 		return (x, *new_states,)
 
-class FastPixelShuffle(nn.Module):
-	def __init__(self, upscale_factor):
+class FastPixelShuffle2(nn.Module):
+	def __init__(self):
 		super().__init__()
 
-		self.upscale_factor = upscale_factor
-
 	def forward(self, x):
-		N, C, W, H = x.shape
+		N, C, H, W = x.shape
 
-		out_channels = C // (self.upscale_factor ** 2)
-		
-		x = x.view(N, out_channels, self.upscale_factor, self.upscale_factor, H, W)
-		x = x.permute(0, 1, 4, 2, 5, 3)
-		x = x.contiguous().view(N, out_channels, H * self.upscale_factor, W * self.upscale_factor)
-		
-		return x
+		out_channels = C // 4
 
-def _test_FastPixelShuffle():
-	fast = FastPixelShuffle(2)
+		c1 = x[:, 0::4, :, :]
+		c2 = x[:, 1::4, :, :]
+		c3 = x[:, 2::4, :, :]
+		c4 = x[:, 3::4, :, :]
+
+		c1_r = c1.reshape(N, out_channels, H, W, 1)
+		c2_r = c2.reshape(N, out_channels, H, W, 1)
+		r1 = torch.cat([c1_r, c2_r], dim=4).reshape(N, out_channels, H, W * 2)
+
+		c3_r = c3.reshape(N, out_channels, H, W, 1)
+		c4_r = c4.reshape(N, out_channels, H, W, 1)
+		r2 = torch.cat([c3_r, c4_r], dim=4).reshape(N, out_channels, H, W * 2)
+
+		r1_flat = r1.reshape(N, out_channels, H, 1, W * 2)
+		r2_flat = r2.reshape(N, out_channels, H, 1, W * 2)
+
+		g = torch.cat([r1_flat, r2_flat], dim=3).reshape(N, out_channels, H * 2, W * 2)
+
+		return g
+
+def _test_FastPixelShuffle2():
+	fast = FastPixelShuffle2()
 	ref = nn.PixelShuffle(2)
 
 	x = torch.randn(10, 8, 16, 16)
@@ -86,10 +98,54 @@ def _test_FastPixelShuffle():
 	x_fast = fast(x)
 	x_ref = ref(x)
 
-	assert torch.allclose(x_ref, x_fast, atol=1e-6), f"max error: {(x_ref - x_fast).abs().max()}"
+	assert torch.allclose(x_ref, x_fast, atol=1e-6), f"Bad FastPixelShuffle2: max error: {(x_ref - x_fast).abs().max()}"
 
-_test_FastPixelShuffle()
+_test_FastPixelShuffle2()
 
+class FastPixelShuffle4(nn.Module):
+	def __init__(self):
+		super().__init__()
+
+	def forward(self, x):
+		N, C, H, W = x.shape
+
+		out_channels = C // 16
+
+		slices = [x[:, i::16, :, :] for i in range(16)]
+		c = [i.reshape(N, out_channels, H, W, 1) for i in slices]
+		r = [torch.cat(c[i:i+4], dim=4).reshape(N, out_channels, H, W * 4) for i in range(0, 16, 4)]
+		r_flat = [i.reshape(N, out_channels, H, 1, W * 4,) for i in r]
+		g = torch.cat(r_flat, dim=3).reshape(N, out_channels, H * 4, W * 4)
+
+		return g
+
+def _test_FastPixelShuffle4():
+	fast = FastPixelShuffle4()
+	ref = nn.PixelShuffle(4)
+
+	x = torch.randn(10, 32, 16, 16)
+
+	x_fast = fast(x)
+	x_ref = ref(x)
+
+	assert torch.allclose(x_ref, x_fast, atol=1e-6), f"Bad FastPixelShuffle4: max error: {(x_ref - x_fast).abs().max()}"
+
+_test_FastPixelShuffle4()
+
+
+class FastPixelShuffle(nn.Module):
+	def __init__(self, upscale_factor):
+		super().__init__()
+
+		if upscale_factor == 2:
+			self.net = FastPixelShuffle2()
+		elif upscale_factor == 4:
+			self.net = FastPixelShuffle4()
+		else:
+			raise RuntimeError(f"No implemented fast pixel shuffle for upscale factor of {upscale_factor}")
+
+	def forward(self, x):
+		return self.net(x)
 
 class FastUpsampleConv2d(nn.Module):
 	def __init__(self, in_channels, out_channels, kernel_size, stride, padding):
