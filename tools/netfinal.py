@@ -81,10 +81,60 @@ class VelPred(nn.Module):
 	def forward(self, x):
 		return self.net(x)
 
+class FastPixelShuffle(nn.Module):
+	def __init__(self, upscale_factor):
+		super().__init__()
+
+		self.upscale_factor = upscale_factor
+
+	def forward(self, x):
+		N, C, H, W = x.shape
+
+		out_channels = C // (self.upscale_factor ** 2)
+
+		x = x.reshape(N, out_channels, self.upscale_factor, self.upscale_factor, H, W)
+		x = x.permute(0, 1, 4, 2, 5, 3)
+		x = x.reshape(N, C // (self.upscale_factor ** 2), H * self.upscale_factor, W * self.upscale_factor)
+
+		return x
+
+def _test_FastPixelShuffle():
+	x = torch.rand((1, 16, 10, 10))
+
+	act = FastPixelShuffle(4)
+	exp = nn.PixelShuffle(4)
+
+	assert torch.allclose(act(x), exp(x)), "Bad FastPixelShuffle implementation"
+
+_test_FastPixelShuffle()
+
+class ConvUpsample(nn.Module):
+	def __init__(self, in_channels, out_channels, kernel_size, padding, upscale_factor):
+		super().__init__()
+
+		self.net = nn.Sequential(
+			nn.Conv2d(in_channels, out_channels * (upscale_factor ** 2), kernel_size=kernel_size, padding=padding),
+			FastPixelShuffle(upscale_factor)
+		)
+
+	def forward(self, x):
+		return self.net(x)
 
 class Net(nn.Module):
-	def __init__(self, generate_vel=True, generate_depthmap=True, train_unet=False, train_velpred=False):
+	def __init__(self, generate_vel=True, generate_depthmap=True, train_unet=False, train_velpred=False, use_convtrans=False):
 		super().__init__()
+
+		# FastPixelShuffle decoder has a throughput of ~28.8fps and uses 2 meta epochs for each decode layer
+		# ConvTrans decoder has a throughput of ~27.1fps and uses over 2x as much npuRAM and uses 3 meta epochs for each decode layer
+
+		# ConvTrans uses hybrid dma reads for strided mem access for depth to space and channel concat
+		# FastPixelShuffle uses hybrid dma reads for strided mem reads for transpose
+
+		# velhead only has a throughput of ~34.4fps and only uses one meta epoch (fully EC)
+
+		# Throughputs are measured with gc collection every 5 inferences and no vision pipeline
+		# All inference outputs are post processed copy by reference and without dequantization (see n6/inference.py)
+		# Deep copy is ~2x slower for EC, and ~1.5x slower for hybrid
 
 		# Nx1x320x320
 		self.enc11 = nn.Conv2d(1, 4, kernel_size=3, padding=1, stride=4)
@@ -115,30 +165,42 @@ class Net(nn.Module):
 
 		if generate_depthmap:
 			# Nx128x10x10
-			self.dec11 = nn.ConvTranspose2d(128, 64, kernel_size=2, stride=2)
+			if use_convtrans:
+				self.dec11 = nn.ConvTranspose2d(128, 64, kernel_size=2, stride=2)
+			else:
+				self.dec11 = ConvUpsample(128, 64, kernel_size=3, padding=1, upscale_factor=2)
 			# Nx64x20x20
 			# skip cat Nx128x20x20
 			self.dec12 = nn.Conv2d(128, 64, kernel_size=3, padding=1)
 			self.dec13 = nn.Conv2d(64, 64, kernel_size=3, padding=1)
 
 			# Nx64x20x20
-			self.dec21 = nn.ConvTranspose2d(64, 32, kernel_size=2, stride=2)
+			if use_convtrans:
+				self.dec21 = nn.ConvTranspose2d(64, 32, kernel_size=2, stride=2)
+			else:
+				self.dec21 = ConvUpsample(64, 32, kernel_size=3, padding=1, upscale_factor=2)
 			# Nx32x40x40
 			# skip cat Nx64x40x40
 			self.dec22 = nn.Conv2d(64, 32, kernel_size=3, padding=1)
 			self.dec23 = nn.Conv2d(32, 32, kernel_size=3, padding=1)
 
 			# Nx32x40x40
-			self.dec31 = nn.ConvTranspose2d(32, 16, kernel_size=2, stride=2)
+			if use_convtrans:
+				self.dec31 = nn.ConvTranspose2d(32, 16, kernel_size=2, stride=2)
+			else:
+				self.dec31 = ConvUpsample(32, 16, kernel_size=3, padding=1, upscale_factor=2)
 			# Nx16x80x80
 			# skip cat Nx32x80x80
 			self.dec32 = nn.Conv2d(32, 16, kernel_size=3, padding=1)
 			self.dec33 = nn.Conv2d(16, 16, kernel_size=3, padding=1)
 
 			# Nx16x80x80
-			self.dec41 = nn.Conv2d(16, 4, kernel_size=3, padding=0)
+			self.dec41 = nn.Conv2d(16, 4, kernel_size=3, padding=1)
 			# Nx4x80x80
-			self.dec42 = nn.ConvTranspose2d(4, 1, kernel_size=4, stride=4)
+			if use_convtrans:
+				self.dec42 = nn.ConvTranspose2d(4, 1, kernel_size=4, stride=4)
+			else:
+				self.dec42 = ConvUpsample(4, 1, kernel_size=3, padding=1, upscale_factor=4)
 			# Nx1x320x320
 
 		if generate_vel:
@@ -231,7 +293,9 @@ class Net(nn.Module):
 		if self.generate_vel:
 			x = vel = self.vel_head(latent)
 
-		return (vel,) if self.generate_vel else () + (depth,) if self.generate_depthmap else (), (*states,)
+		return ((vel,) if self.generate_vel else ()) + \
+					 ((depth,) if self.generate_depthmap else ()) + \
+					 ((*states,))
 
 	def example_inputs(self):
 		return (torch.empty(1, 1, 320, 320),
@@ -274,7 +338,7 @@ class Net(nn.Module):
 		return ["bem", "h0", "s0", "h1", "s1", "h2", "s2", "h3", "s3"]
 
 	def output_names(self):
-		return ["vel"] if self.generate_vel else [] + \
-					 ["depth"] if self.generate_depthmap else [] + \
-					 ["h0_next", "s0_next", "h1_next", "s1_next", "h2_next", "s2_next", "h3_next", "s3_next"]
+		return (["vel"] if self.generate_vel else []) + \
+					 (["depth"] if self.generate_depthmap else []) + \
+					 (["h0_next", "s0_next", "h1_next", "s1_next", "h2_next", "s2_next", "h3_next", "s3_next"])
 

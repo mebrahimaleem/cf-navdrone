@@ -22,6 +22,9 @@ def main():
 
 	torch_model = net_class()
 
+	print("Model inputs:", torch_model.input_names())
+	print("Model outputs:", torch_model.output_names())
+
 	if len(sys.argv) == 5:
 		chk = torch.load(sys.argv[4], weights_only=True, map_location=torch.device("cpu"))
 		torch_model.load_state_dict(chk)
