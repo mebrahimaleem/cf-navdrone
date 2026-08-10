@@ -61,11 +61,46 @@ class ConvLSTM(nn.Module):
 		return (x, *new_states,)
 
 class VelPred(nn.Module):
-	def __init__(self, in_channels):
+	def __init__(self, in_channels, skip_decoder=False):
 		super().__init__()
 
+		if not skip_decoder:
+			# 1x1x320x320
+			self.cnn = nn.Sequential(
+				nn.Conv2d(1, 4, kernel_size=3, padding=1, stride=4),
+				# 1x4x80x80
+				nn.ReLU(inplace=True),
+				nn.Conv2d(4, 16, kernel_size=3, padding=1),
+				# 1x16x80x80
+				nn.ReLU(inplace=True),
+				nn.MaxPool2d(kernel_size=2, stride=2),
+				# 1x16x40x40
+
+				nn.Conv2d(16, 32, kernel_size=3, padding=1),
+				# 1x32x40x40
+				nn.ReLU(inplace=True),
+				nn.Conv2d(32, 32, kernel_size=3, padding=1),
+				nn.ReLU(inplace=True),
+				nn.MaxPool2d(kernel_size=2, stride=2),
+				# 1x32x20x20
+
+				nn.Conv2d(32, 64, kernel_size=3, padding=1),
+				# 1x64x20x20
+				nn.ReLU(inplace=True),
+				nn.Conv2d(64, 64, kernel_size=3, padding=1),
+				nn.ReLU(inplace=True),
+				nn.MaxPool2d(kernel_size=2, stride=2),
+				# 1x64x10x10
+
+				nn.Conv2d(64, 128, kernel_size=3, padding=1),
+				# 1x128x10x10
+				nn.ReLU(inplace=True),
+				nn.Conv2d(128, 128, kernel_size=3, padding=1),
+				nn.ReLU(inplace=True)
+			)
+
 		# NxCxHxW
-		self.net = nn.Sequential(
+		self.head = nn.Sequential(
 			nn.AdaptiveAvgPool2d((1, 1)),
 
 			# NxCx1x1
@@ -78,8 +113,15 @@ class VelPred(nn.Module):
 			# Nx4
 		)
 
+		self.skip_decoder = skip_decoder
+
+
 	def forward(self, x):
-		return self.net(x)
+		if not self.skip_decoder:
+			x = self.cnn(x)
+
+		x = self.head(x)
+		return x
 
 class FastPixelShuffle(nn.Module):
 	def __init__(self, upscale_factor):
@@ -121,7 +163,7 @@ class ConvUpsample(nn.Module):
 		return self.net(x)
 
 class Net(nn.Module):
-	def __init__(self, generate_vel=True, generate_depthmap=True, train_unet=False, train_velpred=False, use_convtrans=False):
+	def __init__(self, generate_vel=True, generate_depthmap=True, train_unet=False, train_velpred=False, use_convtrans=False, skip_decoder=True):
 		super().__init__()
 
 		# FastPixelShuffle decoder has a throughput of ~28.8fps and uses 2 meta epochs for each decode layer
@@ -130,11 +172,13 @@ class Net(nn.Module):
 		# ConvTrans uses hybrid dma reads for strided mem access for depth to space and channel concat
 		# FastPixelShuffle uses hybrid dma reads for strided mem reads for transpose
 
-		# velhead only has a throughput of ~34.4fps and only uses one meta epoch (fully EC)
-
 		# Throughputs are measured with gc collection every 5 inferences and no vision pipeline
 		# All inference outputs are post processed copy by reference and without dequantization (see n6/inference.py)
 		# Deep copy is ~2x slower for EC, and ~1.5x slower for hybrid
+		# Throughputs measured with genereate_depthmap=True and skip_decoder=True
+
+		# generate_depthmap_True and skip_decoder=False, FastPixelShuffle: ~27.0fps and 2 meta epochs for each decode layer
+		# generate_depthmap=False and skip_decoder=True: Throughput of ~34.4fps and only uses one meta epoch (fully EC)
 
 		# Nx1x320x320
 		self.enc11 = nn.Conv2d(1, 4, kernel_size=3, padding=1, stride=4)
@@ -163,7 +207,7 @@ class Net(nn.Module):
 		# Nx128x10x10
 		self.bottleneck = ConvLSTM(4, (128,) * 4, (3,) * 4, True, 128)
 
-		if generate_depthmap:
+		if generate_depthmap or not skip_decoder:
 			# Nx128x10x10
 			if use_convtrans:
 				self.dec11 = nn.ConvTranspose2d(128, 64, kernel_size=2, stride=2)
@@ -206,10 +250,11 @@ class Net(nn.Module):
 		if generate_vel:
 			# skip from latent
 			# Nx128x10x10
-			self.vel_head = VelPred(128)
+			self.vel_head = VelPred(128, skip_decoder=skip_decoder)
 
 		self.generate_vel = generate_vel
 		self.generate_depthmap = generate_depthmap
+		self.skip_decoder = skip_decoder
 
 		if not train_unet:
 			for module in (self.enc11, self.enc12, self.enc13,
@@ -220,7 +265,7 @@ class Net(nn.Module):
 				for param in module.parameters():
 					param.requires_grad = False
 			
-			if generate_depthmap:
+			if generate_depthmap or not skip_decoder:
 				for module in (self.dec11, self.dec12, self.dec13,
 											self.dec21, self.dec22, self.dec23,
 											self.dec31, self.dec32, self.dec33,
@@ -261,7 +306,7 @@ class Net(nn.Module):
 		x, *states = self.bottleneck(x, *states)
 		latent = x
 
-		if self.generate_depthmap:
+		if self.generate_depthmap or not self.skip_decoder:
 			x = self.dec11(x)
 			x = F.relu(x, inplace=True)
 			x = torch.cat([x, skip4], dim=1)
@@ -291,7 +336,12 @@ class Net(nn.Module):
 			x = depth = self.dec42(x)
 		
 		if self.generate_vel:
-			x = vel = self.vel_head(latent)
+			if self.skip_decoder:
+				x = latent
+			else:
+				x = depth
+
+			x = vel = self.vel_head(x)
 
 		return ((vel,) if self.generate_vel else ()) + \
 					 ((depth,) if self.generate_depthmap else ()) + \
