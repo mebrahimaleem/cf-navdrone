@@ -163,7 +163,7 @@ class ConvUpsample(nn.Module):
 		return self.net(x)
 
 class Net(nn.Module):
-	def __init__(self, generate_vel=True, generate_depthmap=True, train_unet=False, train_velpred=False, use_convtrans=False, skip_decoder=True):
+	def __init__(self, generate_vel=True, generate_depthmap=False, train_unet=False, train_velpred=False, use_convtrans=False, skip_decoder=True):
 		super().__init__()
 
 		# FastPixelShuffle decoder has a throughput of ~28.8fps and uses 2 meta epochs for each decode layer
@@ -174,7 +174,7 @@ class Net(nn.Module):
 
 		# Throughputs are measured with gc collection every 5 inferences and no vision pipeline
 		# All inference outputs are post processed copy by reference and without dequantization (see n6/inference.py)
-		# Deep copy is ~2x slower for EC, and ~1.5x slower for hybrid
+		# Copy is ~2x slower for EC, and ~1.5x slower for hybrid. This is because output tensors are cached on npuRAM, not hyperRAM
 		# Throughputs measured with genereate_depthmap=True and skip_decoder=True
 
 		# generate_depthmap_True and skip_decoder=False, FastPixelShuffle: ~27.0fps and 2 meta epochs for each decode layer

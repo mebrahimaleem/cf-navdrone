@@ -139,9 +139,11 @@ async def pipeline():
 			global h0, s0, h1, s1, h2, s2, h3, s3
 
 			# outputs tensors are stored on npuRAM. Copy by reference prevents expensive DMA reads
-			vel, depth, h0, s0, h1, s1, h2, s2, h3, s3 = outputs
+			vel, h0, s0, h1, s1, h2, s2, h3, s3 = outputs
+			#vel, depth, h0, s0, h1, s1, h2, s2, h3, s3 = outputs
 
-			return vel, depth
+			return vel
+			#return vel, depth
 
 
 	try:
@@ -187,11 +189,18 @@ async def pipeline():
 			
 			create_bem(bem, events, event_count, 320, csi.PIX_ON_EVENT, csi.PIX_OFF_EVENT)
 
-			vel, depth = model.predict([bem, h0, s0, h1, s1, h2, s2, h3, s3])
+			vel = model.predict([bem, h0, s0, h1, s1, h2, s2, h3, s3])
+			#vel, depth = model.predict([bem, h0, s0, h1, s1, h2, s2, h3, s3])
 
 			cf_con.write_flight_command(cmd)
 			cf_con.track_fps(clock.fps())
 			clock.tick()
+
+			# Pipeline Throughputs (skip decoder, FastPixelShuffle)
+			# With depth: ~26fps
+			# Without depth: ~31fps
+			# Throughtputs vary based on number of events. Can be improved by tweaking DMA buffer
+			# Binning may need to span multiple frames to increase bem details
 
 			gc_counter += 1
 			if gc_counter == GC_COUNTER_THRESH:
