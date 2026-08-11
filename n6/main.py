@@ -8,7 +8,7 @@ import sys
 import time
 from ulab import numpy as np
 
-FORCE_HEARTBEAT = True
+FORCE_HEARTBEAT = False
 
 
 class LEDManager:
@@ -166,13 +166,27 @@ async def pipeline():
 
 		clock.tick()
 		while True:
-
 			await asyncio.sleep_ms(0)
 
 			event_count = csi0.ioctl(csi.IOCTL_GENX320_READ_EVENTS, events)
 
-			new_events = events[:event_count]
-			# TODO: generate bem
+			@micropython.viper
+			def create_bem(bem_ptr: ptr8, events_ptr: ptr16, num_events: int, width: int, pix_on: int, pix_off: int):
+				for i in range(num_events):
+					offset = i * 6
+					t = events_ptr[offset]
+					x = events_ptr[offset + 5] # camera is mounted sideways
+					y = events_ptr[offset + 4]
+
+					bem_idx = y * width + x
+
+					if t == pix_on:
+						bem_ptr[bem_idx] = 1
+					elif t == pix_off:
+						bem_ptr[bem_idx] = 1 # -1 uint8
+			
+			create_bem(bem, events, event_count, 320, csi.PIX_ON_EVENT, csi.PIX_OFF_EVENT)
+
 			vel, depth = model.predict([bem, h0, s0, h1, s1, h2, s2, h3, s3])
 
 			cf_con.write_flight_command(cmd)
