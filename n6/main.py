@@ -183,7 +183,7 @@ async def pipeline():
 					if t == pix_on:
 						bem_ptr[bem_idx] = 1
 					elif t == pix_off:
-						bem_ptr[bem_idx] = 1 # -1 uint8
+						bem_ptr[bem_idx] = 255 # -1 uint8
 			
 			create_bem(bem, events, event_count, 320, csi.PIX_ON_EVENT, csi.PIX_OFF_EVENT)
 
