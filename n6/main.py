@@ -1,16 +1,21 @@
 import asyncio
+import csi
+import gc
+import ml
+from pyb import LED, UART
+import struct
+import sys
+import time
+from ulab import numpy as np
 
-ENABLE_LOG = False
-ENABLE_RADIO = False
+FORCE_HEARTBEAT = True
 
 
 class LEDManager:
-	from pyb import LED
-
 	def __init__(self):
-		self.red_led = LEDManager.LED(1)
-		self.green_led = LEDManager.LED(2)
-		self.blue_led = LEDManager.LED(3)
+		self.red_led = LED(1)
+		self.green_led = LED(2)
+		self.blue_led = LED(3)
 		self.red_led.off()
 		self.green_led.off()
 		self.blue_led.off()
@@ -34,9 +39,6 @@ led_manager = LEDManager()
 
 
 class CFConnection:
-	from pyb import UART
-	import struct
-
 	_RESET = 0xB8
 	_MAGIC = 0x3E
 	_FLIGHT_CMD = 0x01
@@ -52,27 +54,29 @@ class CFConnection:
 	FLIGHT_CMD_YRIGHT = 64
 	FLIGHT_CMD_YLEFT = 128
 
+	_FPS_MAX = 255
+
 	def __init__(self):
-		self._con = CFConnection.UART(4, 115200)
+		self._con = UART(4, 115200)
 		self.connected = False
 		self.connected_event = asyncio.Event()
-		self.fps = 0
+		self.fps = CFConnection._FPS_MAX
 
 	async def reset(self):
 		self.connected_event.clear()
 		readback = False
 		while not readback:
 			while self._con.any() < 1:
-				self._con.write(CFConnection.struct.pack("<B", CFConnection._RESET))
+				self._con.write(struct.pack("<B", CFConnection._RESET))
 				await asyncio.sleep_ms(50)
 			while self._con.any() > 0:
-				if CFConnection.struct.unpack("<B", self._con.read(1))[0] == CFConnection._RESET:
+				if struct.unpack("<B", self._con.read(1))[0] == CFConnection._RESET:
 					readback = True
 					break
 		readback = False
 		while not readback:
 			while self._con.any() > 0:
-				if CFConnection.struct.unpack("<B", self._con.read(1))[0] == CFConnection._MAGIC:
+				if struct.unpack("<B", self._con.read(1))[0] == CFConnection._MAGIC:
 					readback = True
 					break
 			await asyncio.sleep_ms(10)
@@ -83,22 +87,25 @@ class CFConnection:
 	def write_flight_command(self, cmd):
 		if not self.connected:
 			return False
-		self._con.write(CFConnection.struct.pack("<BBB", CFConnection._MAGIC, CFConnection._FLIGHT_CMD, cmd))
+		self._con.write(struct.pack("<BBB", CFConnection._MAGIC, CFConnection._FLIGHT_CMD, cmd))
 		return True
 
 	def track_fps(self, fps):
-		self.fps = max(fps, self.fps)
+		self.fps = min(fps, self.fps)
 
 	def log_fps(self):
 		try:
+			if self.fps > CFConnection._FPS_MAX:
+				self.fps = CFConnection._FPS_MAX
+
+			fps = self.fps
+			self.fps = CFConnection._FPS_MAX
+
+			print("fps:", fps)
+
 			if not self.connected:
 				return False
-			if self.fps > 255:
-				self.fps = 255
-			elif self.fps < 0:
-				self.fps = 0
-			self._con.write(CFConnection.struct.pack("<BBB", CFConnection._MAGIC, CFConnection._LOG_FPS, int(self.fps)))
-			self.fps = 0
+			self._con.write(struct.pack("<BBB", CFConnection._MAGIC, CFConnection._LOG_FPS, int(fps)))
 			return True
 		except:
 			return False
@@ -106,155 +113,77 @@ class CFConnection:
 	def log_error(self, state=0):
 		if not self.connected:
 			return False
-		self._con.write(CFConnection.struct.pack("<BBB", CFConnection._MAGIC, CFConnection._LOG_ERROR, state))
+		self._con.write(struct.pack("<BBB", CFConnection._MAGIC, CFConnection._LOG_ERROR, state))
 		return True
 
 
 cf_con = CFConnection()
 
-
-async def radio_handler(characteristic):
-	while True:
-		conn, data = await characteristic.written()
-
-async def radio():
-	import aioble
-	import bluetooth
-	from micropython import const
-
-	ble = bluetooth.BLE()
-	ble.active(False)
-
-	await asyncio.sleep_ms(200)
-
-	ble.active(True)
-	service_uuid = bluetooth.UUID(0x1815)
-	service = aioble.Service(service_uuid)
-	characteristic = aioble.Characteristic(service, bluetooth.UUID(0x2A56), write=True, capture=True)
-	aioble.register_services(service)
-	asyncio.create_task(radio_handler(characteristic))
-
-	while True:
-		async with await aioble.advertise(
-			250_000,
-			name="N6",
-			services=[service_uuid],
-			appearance=const(512),
-		) as connection:
-			await connection.disconnected()
-
 async def pipeline():
-	from ulab import numpy as np
-	import csi
-	import time
-	import sys
-	import ml
+	h0 = np.zeros((1, 10, 10, 128), dtype=np.int8)
+	s0 = np.zeros((1, 10, 10, 128), dtype=np.int8)
+	h1 = np.zeros((1, 10, 10, 128), dtype=np.int8)
+	s1 = np.zeros((1, 10, 10, 128), dtype=np.int8)
+	h2 = np.zeros((1, 10, 10, 128), dtype=np.int8)
+	s2 = np.zeros((1, 10, 10, 128), dtype=np.int8)
+	h3 = np.zeros((1, 10, 10, 128), dtype=np.int8)
+	s3 = np.zeros((1, 10, 10, 128), dtype=np.int8)
 
+	bem = np.zeros((1, 320, 320, 1), dtype=np.int8)
 
 	class PostProcess:
 		def __init__(self):
 			pass
 
 		def __call__(self, model, inputs, outputs):
-			return outputs
+			global h0, s0, h1, s1, h2, s2, h3, s3
+
+			# outputs tensors are stored on npuRAM. Copy by reference prevents expensive DMA reads
+			vel, depth, h0, s0, h1, s1, h2, s2, h3, s3 = outputs
+
+			return vel, depth
 
 
 	try:
-		model = ml.Model("/rom/model.onnx")
-
-		bem = np.zeros((1, 1, 160, 160))
-		h0 = np.zeros((1, 128, 10, 10))
-		s0 = np.zeros((1, 128, 10, 10))
-		h1 = np.zeros((1, 128, 10, 10))
-		s1 = np.zeros((1, 128, 10, 10))
-		h2 = np.zeros((1, 128, 10, 10))
-		s2 = np.zeros((1, 128, 10, 10))
-		h3 = np.zeros((1, 128, 10, 10))
-		s3 = np.zeros((1, 128, 10, 10))
-
-		# v, depth, h0, s0, h1, s1, h2, s2, h3, s3 = model.predict([bem, h0, s0, h1, s1, h2, s2, h3, s4], postprocess=PostProcess())
-
+		model = ml.Model("/rom/model.onnx", postprocess=PostProcess())
 		events = np.zeros((2048, 6), dtype=np.uint16)
-		pol = np.zeros((2048), dtype=np.int16)
 
 		csi0 = csi.CSI(cid=csi.GENX320)
 		csi0.reset()
 		csi0.ioctl(csi.IOCTL_GENX320_SET_MODE, csi.GENX320_MODE_EVENT, events.shape[0])
 		csi0.ioctl(csi.IOCTL_GENX320_SET_BIASES, csi.GENX320_BIASES_DEFAULT)
 
-		bin_right = 0
-		bin_left = 0
-		bin_top = 0
-		bin_bot = 0
-		bin_center = 0
-
-		cur_interval = 0
-		BIN_INTERVAL = 200
-		THRESH = 100
-
 		cmd = CFConnection.FLIGHT_CMD_IDLE
 
 		clock = time.clock()
+
+		gc.collect()
+		gc.disable()
+
+		GC_COUNTER_THRESH = 5
+
+		gc_counter = 0
+
+		clock.tick()
 		while True:
-			clock.tick()
 
 			await asyncio.sleep_ms(0)
 
 			event_count = csi0.ioctl(csi.IOCTL_GENX320_READ_EVENTS, events)
-			cur_interval += event_count
 
 			new_events = events[:event_count]
-			new_pol = pol[:event_count]
-			new_pol[:] = 0	
-			event_types = new_events[:, 0]
-			y = new_events[:, 4]
-			x = new_events[:, 5]
-
-			new_pol[event_types == csi.PIX_OFF_EVENT] = 1
-			new_pol[event_types == csi.PIX_ON_EVENT] = -1
-
-			cond_left = x <= 100
-			cond_right = x >= 220
-			cond_top = ~cond_right & ~cond_left & (y <= 100)
-			cond_bot = ~cond_right & ~cond_left & (y >= 220)
-			cond_center = ~cond_right & ~cond_left & ~cond_top & ~cond_bot
-
-			bin_right += abs(np.sum(new_pol[cond_right]))
-			bin_left += abs(np.sum(new_pol[cond_left]))
-			bin_top += abs(np.sum(new_pol[cond_top]))
-			bin_bot += abs(np.sum(new_pol[cond_bot]))
-			bin_center += abs(np.sum(new_pol[cond_center]))
-
-			if cur_interval >= BIN_INTERVAL:
-				block_left = bin_left >= THRESH
-				block_right = bin_right >= THRESH
-				block_center = bin_center >= THRESH
-				block_top = bin_top >= THRESH
-				block_bot = bin_bot >= THRESH
-
-				bin_left = bin_right = bin_top = bin_bot = bin_center = cur_interval = 0
-
-				cmd = CFConnection.FLIGHT_CMD_IDLE
-				if block_center:
-					if not block_right:
-						cmd = CFConnection.FLIGHT_CMD_FWD | CFConnection.FLIGHT_CMD_RIGHT | CFConnection.FLIGHT_CMD_YRIGHT
-					elif not block_left:
-						cmd = CFConnection.FLIGHT_CMD_FWD | CFConnection.FLIGHT_CMD_LEFT | CFConnection.FLIGHT_CMD_YLEFT
-					else:
-						cmd = CFConnection.FLIGHT_CMD_BCK | CFConnection.FLIGHT_CMD_YLEFT
-				elif block_right and not block_left:
-					cmd = CFConnection.FLIGHT_CMD_FWD | CFConnection.FLIGHT_CMD_LEFT | CFConnection.FLIGHT_CMD_YLEFT
-				elif block_left and not block_right:
-					cmd = CFConnection.FLIGHT_CMD_FWD | CFConnection.FLIGHT_CMD_RIGHT | CFConnection.FLIGHT_CMD_YRIGHT
-				elif block_left and block_right:
-					cmd = CFConnection.FLIGHT_CMD_FWD
-				elif block_top or block_bot:
-					cmd = CFConnection.FLIGHT_CMD_FWD
-				else:
-					cmd = CFConnection.FLIGHT_CMD_FWD
+			# TODO: generate bem
+			vel, depth = model.predict([bem, h0, s0, h1, s1, h2, s2, h3, s3])
 
 			cf_con.write_flight_command(cmd)
 			cf_con.track_fps(clock.fps())
+			clock.tick()
+
+			gc_counter += 1
+			if gc_counter == GC_COUNTER_THRESH:
+				gc.collect()
+				gc_counter = 0
+
 
 	except Exception as e:
 		print("Pipeline Crashed")
@@ -263,22 +192,9 @@ async def pipeline():
 		await asyncio.sleep_ms(1000)
 		asyncio.create_task(pipeline())
 
-async def log():
-	while True:
-		if not cf_con.connected:
-			await cf_con.connected_event.wait()
-		await asyncio.sleep_ms(1000)
-
-async def cleanup():
-	import gc
-	gc.disable()
-	while True:
-		gc.collect()
-		await asyncio.sleep_ms(1000)
-
 async def heartbeat():
 	while True:
-		if not cf_con.connected:
+		if not cf_con.connected and not FORCE_HEARTBEAT:
 			led_manager.led_disconnected()
 			await cf_con.reset()
 
@@ -287,13 +203,7 @@ async def heartbeat():
 		await asyncio.sleep_ms(500)
 
 async def main():
-	asyncio.create_task(cleanup())
 	asyncio.create_task(pipeline())
-
-	if ENABLE_LOG:
-		asyncio.create_task(log())
-	if ENABLE_RADIO:
-		asyncio.create_task(radio())
 
 	await heartbeat()
 
