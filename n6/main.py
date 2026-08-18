@@ -8,7 +8,7 @@ import sys
 import time
 from ulab import numpy as np
 
-FORCE_HEARTBEAT = False
+FORCE_HEARTBEAT = True
 
 
 class LEDManager:
@@ -101,8 +101,6 @@ class CFConnection:
 			fps = self.fps
 			self.fps = CFConnection._FPS_MAX
 
-			print("fps:", fps)
-
 			if not self.connected:
 				return False
 			self._con.write(struct.pack("<BBB", CFConnection._MAGIC, CFConnection._LOG_FPS, int(fps)))
@@ -174,6 +172,9 @@ async def pipeline():
 
 			@micropython.viper
 			def create_bem(bem_ptr: ptr8, events_ptr: ptr16, num_events: int, width: int, pix_on: int, pix_off: int):
+				for i in range(width * width):
+					bem_ptr[i] = 0
+
 				for i in range(num_events):
 					offset = i * 6
 					t = events_ptr[offset]
