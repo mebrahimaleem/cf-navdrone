@@ -1,3 +1,6 @@
 [submodule "crazyflie-firmware"]
 	path = crazyflie-firmware
 	url = https://github.com/mebrahimaleem/crazyflie-firmware.git
+[submodule "training/depth/evfly-teacher"]
+	path = training/depth/evfly-teacher
+	url = https://github.com/mebrahimaleem/evfly.git
