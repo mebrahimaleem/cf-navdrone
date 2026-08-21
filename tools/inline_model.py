@@ -16,10 +16,12 @@ def main():
 		return -1
 
 	model = onnx.load(sys.argv[1])
+
+	exclude_operators = [("", "Clip"), ("ai.onnx", "Clip")]
 	
 	decomposed_model = onnx.inliner.inline_selected_functions(
 		model,
-		function_ids=[],
+		function_ids=exclude_operators,
 		exclude=True,
 		inline_schema_functions=True
 	)

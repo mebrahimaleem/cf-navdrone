@@ -540,6 +540,107 @@ class ResUNet(nn.Module):
 	def output_names(self):
 		return ["v", "depth", "h0_prev", "s0_prev", "h1_prev", "s1_prev", "h2_prev", "s2_prev", "h3_prev", "s3_prev"]
 
+class VelPredNet(nn.Module):
+	# unrolled two layers and single timestep
+	class LSTM2_1(nn.Module):
+		def __init__(self, input_size, hidden_size):
+			super(VelPredNet.LSTM2_1, self).__init__()
+
+			self.input_size = input_size
+			self.hidden_size = hidden_size
+
+			self.cell1 = nn.LSTMCell(input_size, hidden_size)
+			self.cell2 = nn.LSTMCell(hidden_size, hidden_size)
+
+		def forward(self, x0, h1, c1, h2, c2):
+			h1, c1 = self.cell1(x0, (h1, c1))
+			h2, c2 = self.cell2(h1, (h2, c2))
+
+			return h2, h1, c1, h2, c2
+
+
+	def __init__(self):
+		super(VelPredNet, self).__init__()
+
+		self.register_buffer("mul", torch.ones(1, 1, 60, 90))
+		self.register_buffer("add", torch.ones(1, 1, 60, 90))
+
+		self.conv1 = nn.Conv2d(1, 16, kernel_size=5, padding=1, stride=2)
+		self.conv2 = nn.Conv2d(16, 32, kernel_size=3, padding=1, stride=2)
+		self.conv3 = nn.Conv2d(32, 64, kernel_size=3, padding=1)
+		self.conv4 = nn.Conv2d(64, 128, kernel_size=3, padding=1)
+		self.conv5 = nn.Conv2d(128, 128, kernel_size=3, padding=1)
+		self.conv6 = nn.Conv2d(128, 128, kernel_size=3, padding=1)
+
+		self.flatten = nn.Flatten()
+
+		self.lstm = VelPredNet.LSTM2_1(input_size=128, hidden_size=256)
+
+		self.fc1 = nn.Linear(256, 16)
+		self.fc2 = nn.Linear(16, 2)
+
+
+	def forward(self, x, h1, c1, h2, c2):
+		x = x * self.mul
+		x = x + self.add
+
+		x = torch.clamp(x, min=-5, max=5)
+
+		x = self.conv1(x)
+		x = F.relu(x, inplace=True)
+
+		x = self.conv2(x)
+		x = F.relu(x, inplace=True)
+
+		x = self.conv3(x)
+		x = F.relu(x, inplace=True)
+
+		x = self.conv4(x)
+		x = F.relu(x, inplace=True)
+
+		x = self.conv5(x)
+		x = F.relu(x, inplace=True)
+
+		x = self.conv6(x)
+		x = F.relu(x, inplace=True)
+
+		x = F.adaptive_avg_pool2d(x, (1, 1))
+
+		x = self.flatten(x)
+
+		x, h1, c1, h2, c2 = self.lstm(x, h1, c1, h2, c2)
+
+		x = self.fc1(x)
+		x = F.leaky_relu(x, inplace=True)
+
+		x = self.fc2(x)
+
+		return x, h1, c1, h2, c2
+
+	def example_inputs(self):
+		return (
+				torch.empty(1, 1, 60, 90),
+				torch.empty(1, 256),
+				torch.empty(1, 256),
+				torch.empty(1, 256),
+				torch.empty(1, 256),
+		)
+
+	def gen_calib_data(self, n=100):
+		return [{
+				"obs": torch.zeros(1, 1, 60, 90),
+				"h1_in": torch.zeros(1, 256),
+				"c1_in": torch.zeros(1, 256),
+				"h2_in": torch.zeros(1, 256),
+				"c2_in": torch.zeros(1, 256),
+		} for i in range(n)]
+
+	def input_names(self):
+		return ["obs", "h1_in", "c1_in", "h2_in", "c2_in"]
+
+	def output_names(self):
+		return ["mu", "h1_out", "c1_out", "h2_out", "c2_out"]
+
 net_table = {
 	"SimpleLinear": SimpleLinearNet,
 	"SimpleConv": SimpleConvNet,
@@ -549,5 +650,6 @@ net_table = {
 	"BigConv": BigConvNet,
 	"Complete": CompleteNet,
 	"ResUNet": ResUNet,
-	"Final": FinalNet
+	"Final": FinalNet,
+	"VelPred": VelPredNet,
 }
